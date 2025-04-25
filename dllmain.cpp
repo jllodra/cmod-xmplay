@@ -1,27 +1,33 @@
-// PluginGeneral.cpp
-// Plugin "DB & FTP Browser" para XMPlay: busca en SQLite, descarga por FTP y reproduce.
-
 #include "pch.h"
 
+#include <process.h>
 #include <string>
 #include <cstdlib>
+#include <locale>     // std::locale
+#include <codecvt>    // std::codecvt_utf8<wchar_t>
 #include <windows.h>
+#include <cwchar>      // for std::wcstoll
+#include <fstream>
+#include <sstream> 
 #include <commctrl.h>
+#include <urlmon.h>
 #include <math.h>
+#include "miniz/miniz.h"   // from miniz.c/.h
 #include "xmpfunc.h"
 #include "xmpdsp.h"
 #include "resource.h"  // define IDD_SEARCH
 #include "sqlite\sqlite3.h"
 #include <Shlwapi.h>    // PathRemoveFileSpecW
 #include <map>
+#include <set>
+#include <vector>
 #pragma comment(lib, "Shlwapi.lib")
+#pragma comment(lib, "urlmon.lib")
 
-// ---- Variables globales ----
-static InterfaceProc         g_faceproc;
+static InterfaceProc g_faceproc;
 static XMPFUNC_MISC* xmpfmisc;
 static XMPFUNC_REGISTRY* xmpfreg;
 
-// ---- Prototipos de funciones ----
 static void *WINAPI     Plugin_Init(void);
 static void WINAPI     Plugin_Exit(void* inst);
 static const char* WINAPI Plugin_GetDescription(void* inst);
@@ -32,9 +38,7 @@ static BOOL CALLBACK   SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPA
 static void WINAPI     OpenSearchShortcut(void);
 static void DoSearch(HWND hDlg);
 
-// Estructura mínima de config (vacía)
 struct PluginConfig {
-    // Añade aquí campos si guardas algo
 };
 
 struct PluginData {
@@ -54,6 +58,13 @@ static sqlite3* g_db = nullptr;
 
 static int g_colInitWidth[4] = { 0, 0, 0, 0 };
 
+#define WM_DB_REBUILT    (WM_APP + 100)
+
+struct RebuildParams {
+    HWND    hDlg;
+    HINSTANCE hInst;
+    XMPFUNC_MISC* xmpfmisc;
+};
 
 static const char* g_colNames[] = {
     "extension",  // columna 0
@@ -70,7 +81,6 @@ struct SortData {
     bool  asc;
 };
 
-// Definir esto justo encima de SearchDlgProc
 struct CtrlInfo {
     RECT  rc;        // rect original en coords de cliente
     bool  moveX;     // si debe moverse horizontalmente
@@ -81,6 +91,262 @@ struct CtrlInfo {
 static RECT               g_rcInitClient;
 static std::map<int, CtrlInfo> g_mapCtrls;
 
+// -- DB rebuild
+
+static bool DownloadAllmods(const std::wstring& url, const std::wstring& destZip) {
+    return SUCCEEDED(URLDownloadToFileW(NULL, url.c_str(),
+        destZip.c_str(), 0, NULL));
+}
+
+static std::string ws2utf8(const std::wstring& w)
+{
+    if (w.empty()) return {};
+    int len = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(),
+        nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string s;
+    s.resize(len);
+    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(),
+        &s[0], len, nullptr, nullptr);
+    return s;
+}
+
+static bool ExtractAllmodsTxt(const std::wstring& zipPathW,
+    const std::wstring& outTxtPathW)
+{
+    // 1) UTF-8 paths
+    std::string zipPath = ws2utf8(zipPathW);
+    std::string outTxt = ws2utf8(outTxtPathW);
+
+    // 2) Extract into a heap buffer in one call
+    size_t uncompressed_size = 0;
+    void* p = mz_zip_extract_archive_file_to_heap(
+        zipPath.c_str(),     // path to .zip on disk
+        "allmods.txt",       // the file inside
+        &uncompressed_size,  // filled with its size
+        0                     // flags (0 = default)
+    );
+    if (!p) return false;
+
+    // 3) Write that buffer out to your .txt
+    FILE* fp = nullptr;
+    if (fopen_s(&fp, outTxt.c_str(), "wb") != 0 || !fp) {
+        mz_free(p);
+        return false;
+    }
+    fwrite(p, 1, uncompressed_size, fp);
+    fclose(fp);
+
+    // 4) Clean up
+    mz_free(p);
+    return true;
+}
+
+static bool RebuildDatabase(const std::wstring& txtPathW,
+    const std::wstring& dbPathW)
+{
+    // Remove any old DB
+    ::DeleteFileW(dbPathW.c_str());
+
+    // Open new DB
+    sqlite3* db = nullptr;
+    if (sqlite3_open16(dbPathW.c_str(), &db) != SQLITE_OK)
+        return false;
+
+    // Speed tweaks: in-memory journal + no fsync
+    sqlite3_exec(db, "PRAGMA journal_mode = MEMORY;", nullptr, nullptr, nullptr);
+    sqlite3_exec(db, "PRAGMA synchronous = OFF;", nullptr, nullptr, nullptr);
+
+    // Create FTS5 table
+    const char* ddl =
+        "CREATE VIRTUAL TABLE modland USING fts5("
+        " tracker, extension, artist, song, full_path, size UNINDEXED"
+        ");";
+    if (sqlite3_exec(db, ddl, nullptr, nullptr, nullptr) != SQLITE_OK) {
+        sqlite3_close(db);
+        return false;
+    }
+
+    // Begin one big transaction
+    sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+
+    // Prepare insert statement once
+    sqlite3_stmt* ins = nullptr;
+    const char* sql = "INSERT INTO modland VALUES (?1,?2,?3,?4,?5,?6);";
+    if (sqlite3_prepare_v2(db, sql, -1, &ins, nullptr) != SQLITE_OK) {
+        sqlite3_close(db);
+        return false;
+    }
+
+    // Allowed extensions
+    static const std::set<std::string> allowed = {
+        "mod","s3m","xm","it","mo3","mtm","umx"
+    };
+
+    // Read & parse line-by-line
+    std::wifstream in(txtPathW);
+    in.imbue(std::locale(in.getloc(), new std::codecvt_utf8<wchar_t>));
+    std::wstring line;
+    while (std::getline(in, line)) {
+        // split off size
+        auto tab = line.find(L'\t');
+        if (tab == std::wstring::npos) continue;
+        std::wstring wsiz = line.substr(0, tab);
+        std::wstring rest = line.substr(tab + 1);
+
+        // extension
+        auto dot = rest.rfind(L'.');
+        if (dot == std::wstring::npos) continue;
+        std::string ext = ws2utf8(rest.substr(dot + 1));
+        if (!allowed.count(ext)) continue;
+
+        // first/last slash
+        auto firstSlash = rest.find(L'/');
+        auto lastSlash = rest.rfind(L'/');
+        if (firstSlash == std::wstring::npos || lastSlash == firstSlash)
+            continue;
+
+        std::wstring tracker = rest.substr(0, firstSlash);
+        std::wstring artist = rest.substr(firstSlash + 1,
+            lastSlash - firstSlash - 1);
+        std::wstring song = rest.substr(lastSlash + 1);
+
+        // Bind UTF-8 params
+        sqlite3_bind_text(ins, 1, ws2utf8(tracker).c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 2, ext.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 3, ws2utf8(artist).c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 4, ws2utf8(song).c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 5, ws2utf8(rest).c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(ins, 6, std::wcstoll(wsiz.c_str(), nullptr, 10));
+
+        sqlite3_step(ins);
+        sqlite3_reset(ins);
+    }
+
+    // Finish up
+    sqlite3_finalize(ins);
+    sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+
+
+    return true;
+}
+
+// Closes the old g_db, renames cmod_new.db → cmod.db, and re-opens g_db
+static bool SwapInNewDatabase()
+{
+    // 1) Compute paths
+    wchar_t modulePath[MAX_PATH];
+    GetModuleFileNameW(hInstance, modulePath, MAX_PATH);
+    PathRemoveFileSpecW(modulePath);
+    std::wstring dir = modulePath;
+
+    std::wstring oldDb = dir + L"\\cmod.db";
+    std::wstring newDb = dir + L"\\cmod_new.db";
+    std::wstring zip = dir + L"\\allmods.zip";
+    std::wstring txt = dir + L"\\allmods.txt";
+
+    // 2) Close old handle
+    if (g_db) {
+        sqlite3_close(g_db);
+        g_db = nullptr;
+    }
+
+    // 3) Replace files on disk
+    ::DeleteFileW(oldDb.c_str());
+    if (!::MoveFileW(newDb.c_str(), oldDb.c_str()))
+        return false;
+
+    // 4) Re-open into g_db
+    if (sqlite3_open16(oldDb.c_str(), &g_db) != SQLITE_OK) {
+        g_db = nullptr;
+        return false;
+    }
+
+    ::DeleteFileW(zip.c_str());
+    ::DeleteFileW(txt.c_str());
+
+    return true;
+}
+
+static unsigned __stdcall RebuildThread(void* pv)
+{
+    auto* p = (RebuildParams*)pv;
+    HWND hDlg = p->hDlg;
+
+    // 1) Download
+    xmpfmisc->ShowBubble("Downloading allmods…", 1000);
+    if (!DownloadAllmods(L"https://modland.com/allmods.zip", L"allmods.zip"))
+        goto fail;
+
+    // 2) Unzip
+    xmpfmisc->ShowBubble("Extracting…", 1000);
+    if (!ExtractAllmodsTxt(L"allmods.zip", L"allmods.txt"))
+        goto fail;
+
+    // 3) Rebuild
+    xmpfmisc->ShowBubble("Rebuilding DB…", 1000);
+    if (!RebuildDatabase(L"allmods.txt", L"cmod_new.db"))
+        goto fail;
+
+    // 4) Swap new → active cmod.db
+    xmpfmisc->ShowBubble("Swapping in new DB…", 1000);
+    if (!SwapInNewDatabase())
+        goto fail;
+
+    // Success
+    PostMessageW(hDlg, WM_DB_REBUILT, TRUE, 0);
+    delete p;
+    return 0;
+
+fail:
+    PostMessageW(hDlg, WM_DB_REBUILT, FALSE, 0);
+    delete p;
+    return 0;
+}
+
+static bool RecreateDatabaseNow()
+{
+    wchar_t modulePath[MAX_PATH];
+    GetModuleFileNameW(hInstance, modulePath, MAX_PATH);
+    PathRemoveFileSpecW(modulePath);
+    std::wstring dir = modulePath;
+
+    std::wstring zip = dir + L"\\allmods.zip";
+    std::wstring txt = dir + L"\\allmods.txt";
+    std::wstring newDb = dir + L"\\cmod_new.db";
+
+    // 1) Download
+    if (!DownloadAllmods(L"https://modland.com/allmods.zip", zip))
+        return false;
+
+    // 2) Extract
+    if (!ExtractAllmodsTxt(zip, txt))
+        return false;
+
+    // 3) Rebuild into cmod_new.db
+    if (!RebuildDatabase(txt, newDb))
+        return false;
+
+    // 4) Swap in and open
+    if (!SwapInNewDatabase())
+        return false;
+
+    return true;
+}
+
+static unsigned __stdcall StartupRebuildThread(void* /*unused*/)
+{
+    xmpfmisc->ShowBubble("Recreating cmod.db…", 2000);
+    if (RecreateDatabaseNow()) {
+        xmpfmisc->ShowBubble("cmod.db ready!", 1000);
+    }
+    else {
+        xmpfmisc->ShowBubble("Failed to recreate cmod.db", 2000);
+    }
+    return 0;
+}
+
 // ---- Implementación ----
 
 static void *WINAPI Plugin_Init(void) {
@@ -88,32 +354,39 @@ static void *WINAPI Plugin_Init(void) {
     xmpfmisc = (XMPFUNC_MISC*)g_faceproc(XMPFUNC_MISC_FACE);
     xmpfreg = (XMPFUNC_REGISTRY*)g_faceproc(XMPFUNC_REGISTRY_FACE);
 
-    // Construye la ruta completa al .db (por ejemplo, junto al DLL)
     wchar_t modulePath[MAX_PATH];
     GetModuleFileNameW(hInstance, modulePath, MAX_PATH);
-    // quita el nombre del DLL para quedarte en la carpeta
     PathRemoveFileSpecW(modulePath);
     std::wstring dbPath = std::wstring(modulePath) + L"\\cmod.db";
 
     DWORD attrs = GetFileAttributesW(dbPath.c_str());
+    bool opened = false;
+
     if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
-        wchar_t msg[512];
-        swprintf(msg, 512, L"Could not find cmod.db in:\n%s", dbPath.c_str());
-        MessageBoxW(NULL, msg, L"Error SQLite", MB_ICONERROR);
-        g_db = nullptr;
+        // missing on disk
+        xmpfmisc->ShowBubble("cmod.db not found, recreating…", 2000);
     }
     else {
-        if (sqlite3_open16(dbPath.c_str(), &g_db) != SQLITE_OK) {
-            MessageBoxW(NULL, L"Could not open cmod.db", L"Error SQLite", MB_ICONERROR);
+        // try to open existing
+        if (sqlite3_open16(dbPath.c_str(), &g_db) == SQLITE_OK) {
+            opened = true;
+        }
+        else {
+            xmpfmisc->ShowBubble("Could not open cmod.db, recreating…", 2000);
+            sqlite3_close(g_db);
             g_db = nullptr;
         }
+    }
 
-        // Comprueba si FTS5 está activo:
-        if (!sqlite3_compileoption_used("ENABLE_FTS5")) {
-            MessageBoxW(NULL,
-                L"¡ERROR! This build of SQLite has no FTS5 enabled.",
-                L"Debug SQLite", MB_ICONWARNING);
-        }
+    if (!opened) {
+        // don’t block—fire off the rebuild in the background
+        xmpfmisc->ShowBubble("cmod.db missing or corrupt, rebuilding…", 2000);
+        uintptr_t th = _beginthreadex(
+            nullptr, 0,
+            StartupRebuildThread,
+            nullptr, 0, nullptr
+        );
+        if (th) CloseHandle((HANDLE)th);
     }
 
     // Registrar diálogo de configuración como menú DSP
@@ -134,7 +407,6 @@ static const char* WINAPI Plugin_GetDescription(void* inst) {
 }
 
 static void WINAPI MyConfig(void* inst, HWND win) {
-    // Abrir diálogo de búsqueda
     /*DialogBoxParam(
         (HINSTANCE)g_faceproc(XMPFUNC_WINDOW_FACE),
         MAKEINTRESOURCE(IDD_SEARCH),
@@ -173,21 +445,6 @@ static LRESULT CALLBACK EditSubclassProc(
         return 0;
     }
     return DefSubclassProc(hWnd, msg, wParam, lParam);
-
-    /*// 1) Dile al diálogo que te envie todas las teclas
-    if (msg == WM_GETDLGCODE) {
-        return DLGC_WANTALLKEYS | DLGC_WANTCHARS;
-    }
-
-    // 2) Ahora sí atrapas el ENTER como WM_KEYDOWN
-    if (msg == WM_KEYDOWN && wParam == VK_RETURN) {
-        // xmpfmisc->ShowBubble("Searching…", 500);
-        DoSearch(GetParent(hWnd));
-        return 0;  // come el ENTER
-    }
-
-    // 3) El resto de mensajes los procesa normalmente
-    return DefSubclassProc(hWnd, msg, wParam, lParam);*/
 }
 
 static void DoSearch(HWND hDlg) {
@@ -344,6 +601,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                 { IDC_COMBO_FORMAT,true,  false, false, false},   // comboFormat se mueve en X
                 { IDC_STATIC_FORMAT,true,false,false, false},     // label format
                 { IDC_BUTTON_ADD_ALL,false,true, false, false},   // botón ADD se mueve en Y
+                { IDC_BUTTON_REBUILD, true, true, false, false},   // botón ADD se mueve en Y
                 { IDC_STATIC_COUNT, false,  true,  false, false},  // contador se mueve X e Y
                 { IDCANCEL,         true,  true,  false, false}   // botón Close idem
             };
@@ -398,6 +656,29 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
             SendMessageW(hComboFormat, CB_ADDSTRING, 0, (LPARAM)L"S3M");
             SendMessageW(hComboFormat, CB_ADDSTRING, 0, (LPARAM)L"MOD");
             SendMessageW(hComboFormat, CB_SETCURSEL, 0, 0);  // por defecto "Any"
+
+            // Load our plugin’s icon from resources
+            HICON hIconSmall = (HICON)LoadImageW(
+                hInstance,
+                MAKEINTRESOURCE(IDI_ICON1),
+                IMAGE_ICON,
+                GetSystemMetrics(SM_CXSMICON),
+                GetSystemMetrics(SM_CYSMICON),
+                LR_DEFAULTCOLOR
+            );
+            HICON hIconBig = (HICON)LoadImageW(
+                hInstance,
+                MAKEINTRESOURCE(IDI_ICON1),
+                IMAGE_ICON,
+                GetSystemMetrics(SM_CXICON),
+                GetSystemMetrics(SM_CYICON),
+                LR_DEFAULTCOLOR
+            );
+            if (hIconSmall)
+                SendMessageW(hDlg, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
+            if (hIconBig)
+                SendMessageW(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+
 
             return TRUE;
         }
@@ -474,11 +755,40 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                 return TRUE;
             }
 
+            case IDC_BUTTON_REBUILD:
+            {
+                // disable button
+                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), FALSE);
+                // launch thread
+                auto* params = new RebuildParams{ hDlg };
+                uintptr_t th = _beginthreadex(
+                    nullptr, 0, RebuildThread, params, 0, nullptr
+                );
+                if (th) CloseHandle((HANDLE)th);
+                else {
+                    MessageBoxW(hDlg, L"Could not start rebuild", L"Error", MB_ICONERROR);
+                    delete params;
+                    EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), TRUE);
+                }
+                return TRUE;
+            }
+
             case IDCANCEL:
                 EndDialog(hDlg, 0);
                 return TRUE;
             }
             break;
+        }
+
+        case WM_DB_REBUILT:
+        {
+            BOOL ok = (BOOL)wParam;
+            xmpfmisc->ShowBubble(
+                ok ? "DB rebuilt successfully!" : "DB rebuild failed.",
+                1000
+            );
+            EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), TRUE);
+            return TRUE;
         }
 
         case WM_NOTIFY: {
@@ -741,7 +1051,7 @@ XMPDSP *WINAPI XMPDSP_GetInterface2(DWORD face, InterfaceProc faceproc) {
     xmpfmisc = (XMPFUNC_MISC*)faceproc(XMPFUNC_MISC_FACE);
     static const XMPSHORTCUT shortcut = {
         0x20001,
-        "cmod – Open search dialog",
+        "cmod - Open search dialog",
         OpenSearchShortcut
     };
     xmpfmisc->RegisterShortcut(&shortcut);
@@ -749,45 +1059,11 @@ XMPDSP *WINAPI XMPDSP_GetInterface2(DWORD face, InterfaceProc faceproc) {
     return &plugin;
 }
 
-// call this once early (e.g. in DllMain or Plugin_Init)
-void ReplaceDialogClassIcon()
-{
-    // Step 1: pull down the existing dialog class info
-    WNDCLASSEXW wc = { sizeof(wc) };
-    if (GetClassInfoExW(NULL, L"#32770", &wc))
-    {
-        // Step 2: load *your* icon from this DLL’s resources
-        HICON hIcon = (HICON)LoadImageW(
-            hInstance,                      // dll HINSTANCE saved in DllMain
-            MAKEINTRESOURCE(IDI_ICON1),
-            IMAGE_ICON,
-            GetSystemMetrics(SM_CXICON),    // big icon
-            GetSystemMetrics(SM_CYICON),
-            LR_DEFAULTCOLOR
-        );
-
-        // Step 3: overwrite the class’s icons
-        if (hIcon) {
-            wc.hIcon = hIcon;
-            wc.hIconSm = hIcon;
-            wc.hInstance = hInstance;
-            // re-register under the *same* name "#32770"
-            RegisterClassExW(&wc);
-        }
-    }
-}
-
 BOOL WINAPI DllMain(HINSTANCE hDLL, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         hInstance = hDLL;
         DisableThreadLibraryCalls(hDLL);
-        ReplaceDialogClassIcon();
     }
     return TRUE;
 }
 
-// MyPlugin.def
-// -------
-// LIBRARY "PluginDBFTP"
-// EXPORTS
-//     XMPDSP_GetInterface2

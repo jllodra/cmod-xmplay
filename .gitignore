@@ -1,0 +1,61 @@
+# === Visual Studio ===
+.vs
+.vs/                             # VS 2015+ workspace settings
+*.suo                            # Solution user options
+*.user                           # Project user options
+*.userosscache
+*.sln.docstates
+*.VC.db                          # VS IntelliSense database
+*.VC.opendb
+*.opensdf
+*.sdf
+*.ncb
+
+# === Build artifacts ===
+# (adjust x64/Win32 if you use other platforms/configurations)
+Debug/
+Release/
+x64/Debug/
+x64/Release/
+
+# obj & bin
+[Bb]in/
+[Oo]bj/
+
+# compiled binaries
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.idb
+*.ilk
+
+# linker logs
+*.log
+*.tlog/
+
+# === Generated / intermediate files ===
+*.aps                            # Visual C++ property sheet
+*_i.c
+*_p.c
+
+# precompiled headers
+*.pch
+*.pch.h
+*.pch.cpp
+
+# === Resource compiler ===
+*.res
+*.tlh
+*.tli
+
+# === Databases & downloads ===
+*.db                             # ignore built or downloaded DB files
+*.zip                            # ignore allmods.zip
+*.txt                            # ignore allmods.txt (if not docs)
+*.csv                            # ignore generated CSV
+
+# === Misc ===
+*.DS_Store
+Thumbs.db

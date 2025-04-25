@@ -1,1 +1,30 @@
-"# cmod-xmplay" 
+# cmod-xmplay
+
+xmplay plugin to browse and play directly from modland.com (the biggest source of module music online).
+
+## Installation
+
+* Go to the Releases page https://github.com/jllodra/cmod-xmplay/releases
+* Download `xmp-cmod.dll` and (optionally) `cmod.db`
+* Copy the file(s) to the `plugins` forlder of xmplay, for example: `C:\xmplay40\plugins`
+* Launch xmplay
+* Add a shortcut to open the plugin dialog:
+
+![image](https://github.com/user-attachments/assets/2872595e-9467-490b-868a-925fc740610c)
+
+And press a key to, I have it binded to the `W` key.
+
+* Close `Options` and press `W`.
+
+## Usage
+
+![image](https://github.com/user-attachments/assets/fcd6a24d-908b-4df0-9464-dc9df7ba19e5)
+
+* Double click on a song: Adds it to playlist
+* Right click on a song: Opens context dialog with options
+* ALT + Double click on a song: Opens the song
+* "Add all to playlist" button adds all the results
+* "Rebuild db" rebuilds the modland database by parsing `allmods.zip` in http://modland.com/
+
+Enjoy and spread the word,
+herotyc

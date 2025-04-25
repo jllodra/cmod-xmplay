@@ -6,8 +6,8 @@ xmplay plugin to browse and play directly from modland.com (the biggest source o
 
 * Go to the Releases page https://github.com/jllodra/cmod-xmplay/releases
 * Download `xmp-cmod.dll` and (optionally) `cmod.db`
-* Copy the file(s) to the `plugins` forlder of xmplay, for example: `C:\xmplay40\plugins`
-* Launch xmplay
+* Copy the file(s) to the `plugins` folder of xmplay, for example: `C:\xmplay40\plugins` (create the folder if necessary)
+* Launch xmplay (only tested in xmplay 4 or later): https://www.un4seen.com/
 * Add a shortcut to open the plugin dialog:
 
 ![image](https://github.com/user-attachments/assets/2872595e-9467-490b-868a-925fc740610c)

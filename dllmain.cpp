@@ -377,8 +377,20 @@ static void *WINAPI Plugin_Init(void) {
     else {
         // try to open existing
         if (!g_db) {
-            if (sqlite3_open16(dbPath.c_str(), &g_db) == SQLITE_OK) {
+            int rc = sqlite3_open16(dbPath.c_str(), &g_db);
+            if (rc == SQLITE_OK) {
                 opened = true;
+            }
+            else {
+                const wchar_t* errW =
+                    reinterpret_cast<const wchar_t*>(sqlite3_errmsg16(g_db));
+
+                std::wstring msg = L"Error opening cmod.db:\n";
+                msg += dbPath;
+                msg += L"\n\nSQLite error:\n";
+                msg += errW;
+
+                MessageBoxW(NULL, msg.c_str(), L"SQLite Error", MB_OK | MB_ICONERROR);
             }
         }
     }
@@ -469,6 +481,14 @@ static LRESULT CALLBACK EditSubclassProc(
 }
 
 static void DoSearch(HWND hDlg) {
+    if (!g_db) {
+        MessageBoxW(NULL,
+            L"g_db is NULL – database not yet open!",
+            L"Debug",
+            MB_OK | MB_ICONERROR);
+        return;
+    }
+
     HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
     ListView_DeleteAllItems(hList);
 

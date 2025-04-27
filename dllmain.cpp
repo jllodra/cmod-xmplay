@@ -271,36 +271,44 @@ static bool SwapInNewDatabase()
 
 static unsigned __stdcall RebuildThread(void* pv)
 {
-    auto* p = (RebuildParams*)pv;
-    HWND hDlg = p->hDlg;
+    auto* p = static_cast<RebuildParams*>(pv);
+    HWND  hDlg = p->hDlg;
 
-    // 1) Download
+    // 1) Determinar paths
+    wchar_t modulePath[MAX_PATH];
+    GetModuleFileNameW(hInstance, modulePath, MAX_PATH);
+    PathRemoveFileSpecW(modulePath);
+    std::wstring dir = modulePath;
+    std::wstring zip = dir + L"\\allmods.zip";
+    std::wstring txt = dir + L"\\allmods.txt";
+    std::wstring newDb = dir + L"\\cmod_new.db";
+
+    bool success = false;
+
+    // 2) Descarga
     xmpfmisc->ShowBubble("Downloading allmods…", 1000);
-    if (!DownloadAllmods(L"https://modland.com/allmods.zip", L"allmods.zip"))
-        goto fail;
+    if (DownloadAllmods(L"https://modland.com/allmods.zip", zip))
+    {
+        // 3) Extracción
+        xmpfmisc->ShowBubble("Extracting…", 1000);
+        if (ExtractAllmodsTxt(zip, txt))
+        {
+            // 4) Reconstrucción
+            xmpfmisc->ShowBubble("Rebuilding DB…", 1000);
+            if (RebuildDatabase(txt, newDb))
+            {
+                // 5) Swap
+                xmpfmisc->ShowBubble("Swapping in new DB…", 1000);
+                if (SwapInNewDatabase())
+                {
+                    success = true;
+                }
+            }
+        }
+    }
 
-    // 2) Unzip
-    xmpfmisc->ShowBubble("Extracting…", 1000);
-    if (!ExtractAllmodsTxt(L"allmods.zip", L"allmods.txt"))
-        goto fail;
-
-    // 3) Rebuild
-    xmpfmisc->ShowBubble("Rebuilding DB…", 1000);
-    if (!RebuildDatabase(L"allmods.txt", L"cmod_new.db"))
-        goto fail;
-
-    // 4) Swap new → active cmod.db
-    xmpfmisc->ShowBubble("Swapping in new DB…", 1000);
-    if (!SwapInNewDatabase())
-        goto fail;
-
-    // Success
-    PostMessageW(hDlg, WM_DB_REBUILT, TRUE, 0);
-    delete p;
-    return 0;
-
-fail:
-    PostMessageW(hDlg, WM_DB_REBUILT, FALSE, 0);
+    // 6) Notificar resultado y liberar memoria
+    PostMessageW(hDlg, WM_DB_REBUILT, success ? TRUE : FALSE, 0);
     delete p;
     return 0;
 }
@@ -368,12 +376,14 @@ static void *WINAPI Plugin_Init(void) {
     }
     else {
         // try to open existing
-        if (sqlite3_open16(dbPath.c_str(), &g_db) == SQLITE_OK) {
-            opened = true;
+        if (!g_db) {
+            if (sqlite3_open16(dbPath.c_str(), &g_db) == SQLITE_OK) {
+                opened = true;
+            }
         }
     }
 
-    if (!opened) {
+    if (!opened && !g_db) {
         // don’t block—fire off the rebuild in the background
         xmpfmisc->ShowBubble("cmod.db missing or corrupt, rebuilding…", 2000);
         uintptr_t th = _beginthreadex(
@@ -430,15 +440,31 @@ static LRESULT CALLBACK EditSubclassProc(
     UINT_PTR uIdSubclass,
     DWORD_PTR dwRefData
 ) {
+    switch (msg) {
+    case WM_GETDLGCODE:
+        // Queremos ENTER, ESC y el resto de teclas de diálogo
+        return DLGC_WANTALLKEYS;
 
-    if (msg == WM_GETDLGCODE) {
-        // Sólo interesa interceptar RETURN, no todas las teclas
-        return DLGC_WANTMESSAGE;
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN) {
+            DoSearch(GetParent(hWnd));
+            return 0;  // come la tecla y no deje beep
+        }
+        if (wParam == VK_ESCAPE) {
+            // cierra el diálogo con IDCANCEL
+            EndDialog(GetParent(hWnd), IDCANCEL);
+            return 0;  // come la tecla
+        }
+        break;
+
+    case WM_CHAR:
+        if (wParam == '\r' || wParam == '\x1B') {
+            // come tanto RETURN como ESC para evitar el beep
+            return 0;
+        }
+        break;
     }
-    if (msg == WM_KEYDOWN && wParam == VK_RETURN) {
-        DoSearch(GetParent(hWnd));
-        return 0;
-    }
+
     return DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
@@ -509,11 +535,29 @@ static void DoSearch(HWND hDlg) {
         "LIMIT 1000;";
 
     sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(g_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-        MessageBoxA(NULL, sql.c_str(), "SQLite error", MB_OK | MB_ICONERROR);
-        MessageBoxA(NULL, sqlite3_errmsg(g_db), "SQLite error", MB_OK | MB_ICONERROR);
+    int rc = sqlite3_prepare_v2(g_db, sql.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        const char* errMsg = sqlite3_errmsg(g_db);
+
+        std::string fullMsg;
+        fullMsg.reserve(sql.size() + strlen(errMsg) + 64);
+        fullMsg = "When preparing the query:\n";
+        fullMsg += sql;
+        fullMsg += "\n\nSQLite error:\n";
+        fullMsg += errMsg;
+
+        MessageBoxA(
+            NULL,
+            fullMsg.c_str(),
+            "SQLite error",
+            MB_OK | MB_ICONERROR
+        );
+
+        if (stmt) sqlite3_finalize(stmt);
+
         return;
     }
+
 
     // 3) Binder parámetro
     sqlite3_bind_text(stmt, 1, query.c_str(), -1, SQLITE_TRANSIENT);

@@ -6,7 +6,7 @@ xmplay plugin to browse and play directly from modland.com (the biggest source o
 
 * Go to the Releases page https://github.com/jllodra/cmod-xmplay/releases
 * Download `xmp-cmod.dll` and (optionally) `cmod.db`
-* Copy the file(s) to the xmplay folder, for example: `C:\programs\xmplay40` (do **not** put the files in the "plugins" folder or any other folder)
+* Copy the file(s) to the xmplay folder, for example: `C:\programs\xmplay40` (you can put the files in any subfolder you like, too)
 * Launch xmplay (only tested in xmplay 4 or later): https://www.un4seen.com/
 * Enable the plug-in in "DSP -> Plug-ins"
 

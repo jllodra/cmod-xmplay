@@ -100,14 +100,39 @@ static bool DownloadAllmods(const std::wstring& url, const std::wstring& destZip
 
 static std::string ws2utf8(const std::wstring& w)
 {
-    if (w.empty()) return {};
-    int len = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(),
-        nullptr, 0, nullptr, nullptr);
-    if (len <= 0) return {};
+    if (w.empty())
+        return {};
+
+    // Ask for the buffer size *including* the trailing NUL
+    int bufSize = ::WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        w.c_str(),
+        -1,           // convert the entire null-terminated wide string
+        nullptr,
+        0,
+        nullptr,
+        nullptr
+    );
+    if (bufSize <= 0)
+        return {};
+
+    // Allocate a buffer and do the conversion
     std::string s;
-    s.resize(len);
-    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(),
-        &s[0], len, nullptr, nullptr);
+    s.resize(bufSize);
+    ::WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        w.c_str(),
+        -1,
+        &s[0],
+        bufSize,
+        nullptr,
+        nullptr
+    );
+
+    // Drop the trailing NUL from the std::string’s size
+    s.resize(bufSize - 1);
     return s;
 }
 
@@ -258,7 +283,28 @@ static bool SwapInNewDatabase()
         return false;
 
     // 4) Re-open into g_db
-    if (sqlite3_open16(oldDb.c_str(), &g_db) != SQLITE_OK) {
+    std::string oldDbUtf8 = ws2utf8(oldDb);
+    int rc = sqlite3_open_v2(
+        oldDbUtf8.c_str(),
+        &g_db,
+        SQLITE_OPEN_READONLY,
+        nullptr
+    );
+
+    if (rc != SQLITE_OK) {
+        // error -> mensaje
+        const char* errA = sqlite3_errmsg(g_db);
+        int n = MultiByteToWideChar(CP_UTF8, 0, errA, -1, nullptr, 0);
+        std::wstring errW(n, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, errA, -1, &errW[0], n);
+
+        std::wstring msg = L"Cannot reopen DB in:\n";
+        msg += oldDb;
+        msg += L"\n\nSQLite error:\n";
+        msg += errW;
+
+        MessageBoxW(NULL, msg.c_str(), L"SQLite Error", MB_OK | MB_ICONERROR);
+        sqlite3_close(g_db);
         g_db = nullptr;
         return false;
     }
@@ -377,20 +423,50 @@ static void *WINAPI Plugin_Init(void) {
     else {
         // try to open existing
         if (!g_db) {
-            int rc = sqlite3_open16(dbPath.c_str(), &g_db);
-            if (rc == SQLITE_OK) {
-                opened = true;
-            }
-            else {
-                const wchar_t* errW =
-                    reinterpret_cast<const wchar_t*>(sqlite3_errmsg16(g_db));
+            // dbPathW is your std::wstring with the full L"...\\cmod.db" path
+            std::string dbPathUtf8 = ws2utf8(dbPath);
 
-                std::wstring msg = L"Error opening cmod.db:\n";
+            int rc = sqlite3_open_v2(
+                dbPathUtf8.c_str(),
+                &g_db,
+                SQLITE_OPEN_READONLY,  // only open existing DB for reading
+                nullptr                // use default VFS
+            );
+
+            if (rc != SQLITE_OK) {
+                // 1) Get the UTF-8 error message
+                const char* errA = sqlite3_errmsg(g_db);
+
+                // 2) Convert it to UTF-16
+                int needed = MultiByteToWideChar(
+                    CP_UTF8, 0,
+                    errA, -1,
+                    nullptr, 0
+                );
+                std::wstring errW;
+                errW.resize(needed);
+                MultiByteToWideChar(
+                    CP_UTF8, 0,
+                    errA, -1,
+                    &errW[0], needed
+                );
+
+                // 3) Show MessageBoxW with the path and error
+                std::wstring msg = L"Error opening BD in:\n";
                 msg += dbPath;
                 msg += L"\n\nSQLite error:\n";
                 msg += errW;
 
-                MessageBoxW(NULL, msg.c_str(), L"SQLite Error", MB_OK | MB_ICONERROR);
+                MessageBoxW(
+                    NULL,
+                    msg.c_str(),
+                    L"SQLite Error",
+                    MB_OK | MB_ICONERROR
+                );
+
+                // 4) Cleanup
+                sqlite3_close(g_db);
+                g_db = nullptr;
             }
         }
     }

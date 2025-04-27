@@ -371,11 +371,6 @@ static void *WINAPI Plugin_Init(void) {
         if (sqlite3_open16(dbPath.c_str(), &g_db) == SQLITE_OK) {
             opened = true;
         }
-        else {
-            xmpfmisc->ShowBubble("Could not open cmod.db, recreating…", 2000);
-            sqlite3_close(g_db);
-            g_db = nullptr;
-        }
     }
 
     if (!opened) {

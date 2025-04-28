@@ -16,7 +16,7 @@ xmplay plugin to browse and play directly from modland.com (the biggest source o
 
 ![image](https://github.com/user-attachments/assets/2872595e-9467-490b-868a-925fc740610c)
 
-And press a key to, I have it binded to the `W` key.
+And press a key, I have it binded to the `W` key.
 
 * Close `Options` and press `W`.
 

@@ -38,6 +38,14 @@ If you don't want to download a song every time you play it.
 
 Cached files storage path: [https://www.un4seen.com/forum/?topic=20680.0](https://www.un4seen.com/forum/?topic=20680.0)
 
+## Formats imported
+
+Currently only these formats (file extensions to be more precise) are parsed from modland: `"mod","s3m","xm","it","mo3","mtm","umx"`.
+
+xmplay only supports these formats afaik. Adding the [xmp-openmpt](https://lib.openmpt.org/libopenmpt/download/) plugin it should be possible to play many other formats.
+
+If there's interest in having all those ancient formats available, fill an issue and let me know.
+
 ---
 
 Enjoy and spread the word,

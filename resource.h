@@ -15,21 +15,16 @@
 #define IDC_STATIC_SEARCHBY             1012
 #define IDC_STATIC_FORMAT               1013
 #define IDC_BUTTON_REBUILD              1014
-#define IDC_BUTTON_ARTIST               1015
-#define IDC_BUTTON_SONGS                1016
-#define IDC_SONGS_NUMBER                1017
-#define IDC_COMBO_NUMBER                1017
 #define ID_CONTEXT_OPEN                 40002
 #define ID_CONTEXT_ADD                  40003
-#define ID_CONTEXT_SEARCH_ARTIST        40004
 
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
-#define _APS_NEXT_RESOURCE_VALUE        106
+#define _APS_NEXT_RESOURCE_VALUE        105
 #define _APS_NEXT_COMMAND_VALUE         40004
-#define _APS_NEXT_CONTROL_VALUE         1018
+#define _APS_NEXT_CONTROL_VALUE         1015
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

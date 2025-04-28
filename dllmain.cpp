@@ -359,129 +359,9 @@ static unsigned __stdcall RebuildThread(void* pv)
     return 0;
 }
 
-static bool RecreateDatabaseNow()
-{
-    wchar_t modulePath[MAX_PATH];
-    GetModuleFileNameW(hInstance, modulePath, MAX_PATH);
-    PathRemoveFileSpecW(modulePath);
-    std::wstring dir = modulePath;
-
-    std::wstring zip = dir + L"\\allmods.zip";
-    std::wstring txt = dir + L"\\allmods.txt";
-    std::wstring newDb = dir + L"\\cmod_new.db";
-
-    // 1) Download
-    if (!DownloadAllmods(L"https://modland.com/allmods.zip", zip))
-        return false;
-
-    // 2) Extract
-    if (!ExtractAllmodsTxt(zip, txt))
-        return false;
-
-    // 3) Rebuild into cmod_new.db
-    if (!RebuildDatabase(txt, newDb))
-        return false;
-
-    // 4) Swap in and open
-    if (!SwapInNewDatabase())
-        return false;
-
-    return true;
-}
-
-static unsigned __stdcall StartupRebuildThread(void* /*unused*/)
-{
-    xmpfmisc->ShowBubble("Recreating cmod.db…", 2000);
-    if (RecreateDatabaseNow()) {
-        xmpfmisc->ShowBubble("cmod.db ready!", 1000);
-    }
-    else {
-        xmpfmisc->ShowBubble("Failed to recreate cmod.db", 2000);
-    }
-    return 0;
-}
-
 // ---- Implementación ----
 
 static void *WINAPI Plugin_Init(void) {
-    // Obtener APIs
-    xmpfmisc = (XMPFUNC_MISC*)g_faceproc(XMPFUNC_MISC_FACE);
-    xmpfreg = (XMPFUNC_REGISTRY*)g_faceproc(XMPFUNC_REGISTRY_FACE);
-
-    wchar_t modulePath[MAX_PATH];
-    GetModuleFileNameW(hInstance, modulePath, MAX_PATH);
-    PathRemoveFileSpecW(modulePath);
-    std::wstring dbPath = std::wstring(modulePath) + L"\\cmod.db";
-
-    DWORD attrs = GetFileAttributesW(dbPath.c_str());
-    bool opened = false;
-
-    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
-        // missing on disk
-        xmpfmisc->ShowBubble("cmod.db not found, recreating…", 2000);
-    }
-    else {
-        // try to open existing
-        if (!g_db) {
-            // dbPathW is your std::wstring with the full L"...\\cmod.db" path
-            std::string dbPathUtf8 = ws2utf8(dbPath);
-
-            int rc = sqlite3_open_v2(
-                dbPathUtf8.c_str(),
-                &g_db,
-                SQLITE_OPEN_READONLY,  // only open existing DB for reading
-                nullptr                // use default VFS
-            );
-
-            if (rc != SQLITE_OK) {
-                // 1) Get the UTF-8 error message
-                const char* errA = sqlite3_errmsg(g_db);
-
-                // 2) Convert it to UTF-16
-                int needed = MultiByteToWideChar(
-                    CP_UTF8, 0,
-                    errA, -1,
-                    nullptr, 0
-                );
-                std::wstring errW;
-                errW.resize(needed);
-                MultiByteToWideChar(
-                    CP_UTF8, 0,
-                    errA, -1,
-                    &errW[0], needed
-                );
-
-                // 3) Show MessageBoxW with the path and error
-                std::wstring msg = L"Error opening BD in:\n";
-                msg += dbPath;
-                msg += L"\n\nSQLite error:\n";
-                msg += errW;
-
-                MessageBoxW(
-                    NULL,
-                    msg.c_str(),
-                    L"SQLite Error",
-                    MB_OK | MB_ICONERROR
-                );
-
-                // 4) Cleanup
-                sqlite3_close(g_db);
-                g_db = nullptr;
-            }
-        }
-    }
-
-    if (!opened && !g_db) {
-        // don’t block—fire off the rebuild in the background
-        xmpfmisc->ShowBubble("cmod.db missing or corrupt, rebuilding…", 2000);
-        uintptr_t th = _beginthreadex(
-            nullptr, 0,
-            StartupRebuildThread,
-            nullptr, 0, nullptr
-        );
-        if (th) CloseHandle((HANDLE)th);
-    }
-
     // Registrar diálogo de configuración como menú DSP
     pluginData = (PluginData*)calloc(1, sizeof(*pluginData));
     return pluginData;
@@ -557,6 +437,59 @@ static LRESULT CALLBACK EditSubclassProc(
 }
 
 static void DoSearch(HWND hDlg) {
+    if (!g_db) {
+        wchar_t modulePath[MAX_PATH];
+        GetModuleFileNameW(hInstance, modulePath, MAX_PATH);
+        PathRemoveFileSpecW(modulePath);
+        std::wstring dir = modulePath;
+        std::wstring dbPath = dir + L"\\cmod.db";
+
+        std::string dbPathUtf8 = ws2utf8(dbPath);
+
+        int rc = sqlite3_open_v2(
+            dbPathUtf8.c_str(),
+            &g_db,
+            SQLITE_OPEN_READONLY,  // only open existing DB for reading
+            nullptr                // use default VFS
+        );
+
+        if (rc != SQLITE_OK) {
+            // 1) Get the UTF-8 error message
+            const char* errA = sqlite3_errmsg(g_db);
+
+            // 2) Convert it to UTF-16
+            int needed = MultiByteToWideChar(
+                CP_UTF8, 0,
+                errA, -1,
+                nullptr, 0
+            );
+            std::wstring errW;
+            errW.resize(needed);
+            MultiByteToWideChar(
+                CP_UTF8, 0,
+                errA, -1,
+                &errW[0], needed
+            );
+
+            // 3) Show MessageBoxW with the path and error
+            std::wstring msg = L"Error opening BD in:\n - Click on Rebuild DB, wait, and try again";
+            msg += dbPath;
+            msg += L"\n\nSQLite error:\n";
+            msg += errW;
+
+            MessageBoxW(
+                NULL,
+                msg.c_str(),
+                L"SQLite Error",
+                MB_OK | MB_ICONERROR
+            );
+
+            // 4) Cleanup
+            sqlite3_close(g_db);
+            g_db = nullptr;
+        }
+    }
+
     if (!g_db) {
         MessageBoxW(NULL,
             L"g_db is NULL – database not yet open!",

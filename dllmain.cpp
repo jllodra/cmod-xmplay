@@ -11,9 +11,7 @@
 #include <fstream>
 #include <sstream> 
 #include <commctrl.h>
-#include <urlmon.h>
 #include <math.h>
-#include "miniz/miniz.h"   // from miniz.c/.h
 #include "xmpfunc.h"
 #include "xmpdsp.h"
 #include "resource.h"  // define IDD_SEARCH
@@ -23,11 +21,11 @@
 #include <set>
 #include <vector>
 #pragma comment(lib, "Shlwapi.lib")
-#pragma comment(lib, "urlmon.lib")
 
 static InterfaceProc g_faceproc;
 static XMPFUNC_MISC* xmpfmisc;
-static XMPFUNC_REGISTRY* xmpfreg;
+static XMPFUNC_FILE* xmpffile;
+// static XMPFUNC_REGISTRY* xmpfreg;
 
 static void *WINAPI     Plugin_Init(void);
 static void WINAPI     Plugin_Exit(void* inst);
@@ -95,11 +93,6 @@ static std::map<int, CtrlInfo> g_mapCtrls;
 
 // -- DB rebuild
 
-static bool DownloadAllmods(const std::wstring& url, const std::wstring& destZip) {
-    return SUCCEEDED(URLDownloadToFileW(NULL, url.c_str(),
-        destZip.c_str(), 0, NULL));
-}
-
 static std::string ws2utf8(const std::wstring& w)
 {
     if (w.empty())
@@ -136,37 +129,6 @@ static std::string ws2utf8(const std::wstring& w)
     // Drop the trailing NUL from the std::string’s size
     s.resize(bufSize - 1);
     return s;
-}
-
-static bool ExtractAllmodsTxt(const std::wstring& zipPathW,
-    const std::wstring& outTxtPathW)
-{
-    // 1) UTF-8 paths
-    std::string zipPath = ws2utf8(zipPathW);
-    std::string outTxt = ws2utf8(outTxtPathW);
-
-    // 2) Extract into a heap buffer in one call
-    size_t uncompressed_size = 0;
-    void* p = mz_zip_extract_archive_file_to_heap(
-        zipPath.c_str(),     // path to .zip on disk
-        "allmods.txt",       // the file inside
-        &uncompressed_size,  // filled with its size
-        0                     // flags (0 = default)
-    );
-    if (!p) return false;
-
-    // 3) Write that buffer out to your .txt
-    FILE* fp = nullptr;
-    if (fopen_s(&fp, outTxt.c_str(), "wb") != 0 || !fp) {
-        mz_free(p);
-        return false;
-    }
-    fwrite(p, 1, uncompressed_size, fp);
-    fclose(fp);
-
-    // 4) Clean up
-    mz_free(p);
-    return true;
 }
 
 static bool RebuildDatabase(const std::wstring& txtPathW,
@@ -335,24 +297,21 @@ static unsigned __stdcall RebuildThread(void* pv)
 
     // 2) Descarga
     xmpfmisc->ShowBubble("Downloading allmods…", 1000);
-    if (DownloadAllmods(L"https://modland.com/allmods.zip", zip))
-    {
-        // 3) Extracción
-        xmpfmisc->ShowBubble("Extracting…", 1000);
-        if (ExtractAllmodsTxt(zip, txt))
+    XMPFILE file = xmpffile->Open("https://modland.com/allmods.zip|allmods.txt");
+    if (file) {
+        // read and process file here
+        xmpfmisc->ShowBubble("Rebuilding DB…", 1000);
+        if (RebuildDatabase(txt, newDb))
         {
-            // 4) Reconstrucción
-            xmpfmisc->ShowBubble("Rebuilding DB…", 1000);
-            if (RebuildDatabase(txt, newDb))
+            // 5) Swap
+            xmpfmisc->ShowBubble("Swapping in new DB…", 1000);
+            if (SwapInNewDatabase())
             {
-                // 5) Swap
-                xmpfmisc->ShowBubble("Swapping in new DB…", 1000);
-                if (SwapInNewDatabase())
-                {
-                    success = true;
-                }
+                success = true;
             }
         }
+
+        xmpffile->Close(file);
     }
 
     // 6) Notificar resultado y liberar memoria
@@ -1268,6 +1227,7 @@ XMPDSP *WINAPI XMPDSP_GetInterface2(DWORD face, InterfaceProc faceproc) {
 
     // Crear atajo
     xmpfmisc = (XMPFUNC_MISC*)faceproc(XMPFUNC_MISC_FACE);
+    xmpffile = (XMPFUNC_FILE*)faceproc(XMPFUNC_FILE_FACE);
     static const XMPSHORTCUT shortcut = {
         0x20001,
         "cmod - Open search dialog",

@@ -27,9 +27,6 @@
     <ClInclude Include="sqlite\sqlite3.h">
       <Filter>Archivos de encabezado</Filter>
     </ClInclude>
-    <ClInclude Include="miniz\miniz.h">
-      <Filter>Archivos de encabezado</Filter>
-    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -39,9 +36,6 @@
       <Filter>Archivos de origen</Filter>
     </ClCompile>
     <ClCompile Include="sqlite\sqlite3.c">
-      <Filter>Archivos de origen</Filter>
-    </ClCompile>
-    <ClCompile Include="miniz\miniz.c">
       <Filter>Archivos de origen</Filter>
     </ClCompile>
   </ItemGroup>

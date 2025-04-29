@@ -10,6 +10,7 @@
 *.opensdf
 *.sdf
 *.ncb
+*.aps
 
 # === Build artifacts ===
 # (adjust x64/Win32 if you use other platforms/configurations)

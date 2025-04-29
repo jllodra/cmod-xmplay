@@ -19,6 +19,8 @@
 #define IDC_BUTTON_SONGS                1016
 #define IDC_SONGS_NUMBER                1017
 #define IDC_COMBO_NUMBER                1017
+#define IDC_BUTTON1                     1018
+#define IDC_BUTTON_REBUILD_ALL          1018
 #define ID_CONTEXT_OPEN                 40002
 #define ID_CONTEXT_ADD                  40003
 #define ID_CONTEXT_SEARCH_ARTIST        40004
@@ -30,7 +32,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        106
 #define _APS_NEXT_COMMAND_VALUE         40004
-#define _APS_NEXT_CONTROL_VALUE         1018
+#define _APS_NEXT_CONTROL_VALUE         1019
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

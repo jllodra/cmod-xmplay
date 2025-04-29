@@ -57,10 +57,21 @@ static int g_colInitWidth[5] = { 0, 0, 0, 0, 0 };
 
 #define WM_DB_REBUILT    (WM_APP + 100)
 
+// xmplay supported formats only (default)
+static const std::set<std::string> xmplayFormats = {
+    "mod","s3m","xm","it","mo3","mtm","umx"
+};
+
+// all formats (xmplay + openmpt supported)
+static const std::set<std::string> allFormats = {
+    "mptm","mod","s3m","xm","it","669","amf","ams","c67","dbm","digi","dmf","dsm","dsym","dtm","far","fmt","imf","ice","j2b","m15","mdl","med","mms","mt2","mtm","nst","okt","plm","psm","pt36","ptm","sfx","sfx2","st26","stk","stm","stx","stp","symmod","ult","wow","gdm","mo3","oxm","umx","xpk","ppm","mmcmp"
+};
+
 struct RebuildParams {
     HWND    hDlg;
-    HINSTANCE hInst;
-    XMPFUNC_MISC* xmpfmisc;
+    bool all;
+    // HINSTANCE hInst;
+    // XMPFUNC_MISC* xmpfmisc;
 };
 
 static const char* g_colNames[] = {
@@ -185,7 +196,7 @@ static std::string ws2utf8(const std::wstring& w)
 }
 
 static bool RebuildDatabase(XMPFILE txtFile,
-    const std::wstring& dbPathW)
+    const std::wstring& dbPathW, bool all)
 {
     // Remove any old DB
     ::DeleteFileW(dbPathW.c_str());
@@ -220,10 +231,8 @@ static bool RebuildDatabase(XMPFILE txtFile,
         return false;
     }
 
-    // Allowed extensions
-    static const std::set<std::string> allowed = {
-        "mod","s3m","xm","it","mo3","mtm","umx"
-    };
+    // TODO allowed or allowedAncient
+    const std::set<std::string> allowed = all ? allFormats : xmplayFormats;
 
     const int CHUNK = 16 * 1024;
     char  chunkBuf[CHUNK];
@@ -308,8 +317,8 @@ static bool SwapInNewDatabase()
 
     std::wstring oldDb = dir + L"\\cmod.db";
     std::wstring newDb = dir + L"\\cmod_new.db";
-    std::wstring zip = dir + L"\\allmods.zip";
-    std::wstring txt = dir + L"\\allmods.txt";
+    // std::wstring zip = dir + L"\\allmods.zip";
+    // std::wstring txt = dir + L"\\allmods.txt";
 
     // 2) Close old handle
     if (g_db) {
@@ -349,8 +358,8 @@ static bool SwapInNewDatabase()
         return false;
     }
 
-    ::DeleteFileW(zip.c_str());
-    ::DeleteFileW(txt.c_str());
+    // ::DeleteFileW(zip.c_str());
+    // ::DeleteFileW(txt.c_str());
 
     return true;
 }
@@ -359,28 +368,29 @@ static unsigned __stdcall RebuildThread(void* pv)
 {
     auto* p = static_cast<RebuildParams*>(pv);
     HWND  hDlg = p->hDlg;
+    bool all = p->all;
 
     // 1) Determinar paths
     wchar_t modulePath[MAX_PATH];
     GetModuleFileNameW(hInstance, modulePath, MAX_PATH);
     PathRemoveFileSpecW(modulePath);
     std::wstring dir = modulePath;
-    std::wstring zip = dir + L"\\allmods.zip";
-    std::wstring txt = dir + L"\\allmods.txt";
+    // std::wstring zip = dir + L"\\allmods.zip";
+    // std::wstring txt = dir + L"\\allmods.txt";
     std::wstring newDb = dir + L"\\cmod_new.db";
 
     bool success = false;
 
     // 2) Descarga
-    xmpfmisc->ShowBubble("Downloading allmods…", 1000);
+    xmpfmisc->ShowBubble("Downloading allmods...", 1000);
     XMPFILE txtFile = xmpffile->Open("https://modland.com/allmods.zip|allmods.txt");
     if (txtFile) {
         // read and process file here
         xmpfmisc->ShowBubble("Rebuilding DB…", 1000);
-        if (RebuildDatabase(txtFile, newDb))
+        if (RebuildDatabase(txtFile, newDb, all))
         {
             // 5) Swap
-            xmpfmisc->ShowBubble("Swapping in new DB…", 1000);
+            xmpfmisc->ShowBubble("Swapping in new DB...", 1000);
             if (SwapInNewDatabase())
             {
                 success = true;
@@ -747,7 +757,7 @@ static void DoRandomArtist(HWND hDlg)
                     if (raw[0] == 0xFEFF || raw[0] == 0xFFFE)
                         ++raw;
                     // Copy into our own string
-                    artistStr = raw;
+                    artistStr = std::wstring(L"\"") + raw + L"\"";
                 }
             }
         }
@@ -831,8 +841,9 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                 { IDC_BUTTON_SONGS,true, false, false, false},
                 { IDC_COMBO_NUMBER,true, false, false, false},
                 { IDC_BUTTON_ADD_ALL,false,true, false, false},   // botón ADD se mueve en Y
-                { IDC_BUTTON_REBUILD, true, true, false, false},   // botón ADD se mueve en Y
                 { IDC_STATIC_COUNT, false,  true,  false, false},  // contador se mueve X e Y
+                { IDC_BUTTON_REBUILD, true, true, false, false},   // botón ADD se mueve en Y
+                { IDC_BUTTON_REBUILD_ALL, true, true, false, false},   // botón ADD se mueve en Y
                 { IDCANCEL,         true,  true,  false, false}   // botón Close idem
             };
 
@@ -849,6 +860,10 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
             INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_LISTVIEW_CLASSES };
             InitCommonControlsEx(&icex);
 
+            // make the dialog itself clip its children
+            LONG_PTR dlgStyle = GetWindowLongPtr(hDlg, GWL_STYLE);
+            SetWindowLongPtr(hDlg, GWL_STYLE, dlgStyle | WS_CLIPCHILDREN);
+
             SetDlgItemTextW(hDlg, IDC_STATIC_COUNT, L"0 results");
 
             HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
@@ -857,7 +872,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
             LONG_PTR style = GetWindowLongPtr(hList, GWL_STYLE);
             style &= ~LVS_OWNERDATA;   // remove owner-data (virtual) bit
             style |= LVS_REPORT;      // make sure it’s report view
-            SetWindowLongPtr(hList, GWL_STYLE, style);
+            SetWindowLongPtr(hList, GWL_STYLE, style | WS_CLIPSIBLINGS);
 
             // 2) Now set your extended styles:
             DWORD ex = ListView_GetExtendedListViewStyle(hList);
@@ -946,32 +961,38 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
             int dx = newW - g_rcInitClient.right;
             int dy = newH - g_rcInitClient.bottom;
 
+            // begin a batch of window-position changes
+            HDWP hdwp = BeginDeferWindowPos((int)g_mapCtrls.size());
+
             for (auto& kv : g_mapCtrls) {
-                int id = kv.first;
+                HWND hwnd = GetDlgItem(hDlg, kv.first);
                 auto& ci = kv.second;
+
                 int x = ci.rc.left + (ci.moveX ? dx : 0);
                 int y = ci.rc.top + (ci.moveY ? dy : 0);
                 int w = (ci.rc.right - ci.rc.left) + (ci.sizeW ? dx : 0);
                 int h = (ci.rc.bottom - ci.rc.top) + (ci.sizeH ? dy : 0);
-                MoveWindow(GetDlgItem(hDlg, id), x, y, w, h, TRUE);
+
+                hdwp = DeferWindowPos(
+                    hdwp,
+                    hwnd,
+                    NULL,
+                    x, y, w, h,
+                    SWP_NOZORDER
+                );
             }
 
-            if (dx != 0)
-            {
-                HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
-                // Calcula suma de anchos iniciales
-                int sumInit = 0;
-                for (int i = 0; i < 4; ++i) sumInit += g_colInitWidth[i];
+            EndDeferWindowPos(hdwp);
 
-                // Para cada columna, ajusta proporcionalmente:
-                for (int i = 0; i < 4; ++i)
-                {
-                    // nuevo ancho = ancho_inicial + (ancho_inicial / suma_inicial) * dx
-                    int w = g_colInitWidth[i] + MulDiv(g_colInitWidth[i], dx, sumInit);
-                    ListView_SetColumnWidth(hList, i, w);
+            if (dx != 0) {
+                HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
+                int sumInit = 0;
+                for (int i = 0; i < 5; ++i) sumInit += g_colInitWidth[i];
+                for (int i = 0; i < 5; ++i) {
+                    int colw = g_colInitWidth[i] + MulDiv(g_colInitWidth[i], dx, sumInit);
+                    ListView_SetColumnWidth(hList, i, colw);
                 }
             }
-            break;
         }
 
         case WM_COMMAND: {
@@ -1027,8 +1048,9 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
             {
                 // disable button
                 EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), FALSE);
+                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD_ALL), FALSE);
                 // launch thread
-                auto* params = new RebuildParams{ hDlg };
+                auto* params = new RebuildParams{ hDlg, false };
                 uintptr_t th = _beginthreadex(
                     nullptr, 0, RebuildThread, params, 0, nullptr
                 );
@@ -1037,6 +1059,27 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                     MessageBoxW(hDlg, L"Could not start rebuild", L"Error", MB_ICONERROR);
                     delete params;
                     EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), TRUE);
+                    EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD_ALL), TRUE);
+                }
+                return TRUE;
+            }
+
+            case IDC_BUTTON_REBUILD_ALL:
+            {
+                // disable button
+                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), FALSE);
+                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD_ALL), FALSE);
+                // launch thread
+                auto* params = new RebuildParams{ hDlg, true };
+                uintptr_t th = _beginthreadex(
+                    nullptr, 0, RebuildThread, params, 0, nullptr
+                );
+                if (th) CloseHandle((HANDLE)th);
+                else {
+                    MessageBoxW(hDlg, L"Could not start rebuild", L"Error", MB_ICONERROR);
+                    delete params;
+                    EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), TRUE);
+                    EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD_ALL), TRUE);
                 }
                 return TRUE;
             }

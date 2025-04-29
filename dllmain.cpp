@@ -1313,7 +1313,8 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                     }
                     else if (cmd == ID_CONTEXT_SEARCH_ARTIST) {
                         // 1) put artistName into the edit
-                        SetDlgItemTextW(hDlg, IDC_EDIT_SEARCH, artistName);
+                        std::wstring artistNameQuoted = std::wstring(L"\"") + artistName + L"\"";
+                        SetDlgItemTextW(hDlg, IDC_EDIT_SEARCH, artistNameQuoted.c_str());
                         // 2) select “Artist” in the combo
                         SendMessageW(
                             GetDlgItem(hDlg, IDC_COMBO_SEARCH),

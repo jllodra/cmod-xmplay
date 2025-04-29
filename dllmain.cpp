@@ -4,14 +4,9 @@
 #include <process.h>
 #include <string>
 #include <cstdlib>
-#include <locale>     // std::locale
-#include <codecvt>    // std::codecvt_utf8<wchar_t>
 #include <windows.h>
 #include <cwchar>      // for std::wcstoll
-#include <fstream>
-#include <sstream> 
 #include <commctrl.h>
-#include <math.h>
 #include "xmpfunc.h"
 #include "xmpdsp.h"
 #include "resource.h"  // define IDD_SEARCH
@@ -20,6 +15,8 @@
 #include <map>
 #include <set>
 #include <vector>
+#include <urlmon.h>
+#pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "Shlwapi.lib")
 
 static InterfaceProc g_faceproc;
@@ -91,6 +88,46 @@ struct CtrlInfo {
 static RECT               g_rcInitClient;
 static std::map<int, CtrlInfo> g_mapCtrls;
 
+// -- URL encode
+
+std::string url_encode(const std::string& input) {
+    // 0) First convert all '#' → "%23"
+    std::string pre;
+    pre.reserve(input.size());
+    for (unsigned char c : input) {
+        if (c == '#') pre += "%23";
+        else          pre += c;
+    }
+
+    // 1) Ask UrlEscapeA how big the buffer must be (including NUL)
+    DWORD needed = 0;
+    UrlEscapeA(
+        pre.c_str(),
+        nullptr,
+        &needed,
+        URL_ESCAPE_PERCENT
+    );
+    if (needed == 0)
+        return pre;  // nothing to escape (or error)
+
+    // 2) Do the real escape
+    std::string out;
+    out.resize(needed);
+    if (SUCCEEDED(UrlEscapeA(
+        pre.c_str(),
+        &out[0],
+        &needed,
+        URL_ESCAPE_PERCENT)))
+    {
+        // trim trailing NUL
+        out.resize(needed - 1);
+        return out;
+    }
+
+    // fallback
+    return pre;
+}
+
 // -- DB rebuild
 
 static std::string ws2utf8(const std::wstring& w)
@@ -131,7 +168,7 @@ static std::string ws2utf8(const std::wstring& w)
     return s;
 }
 
-static bool RebuildDatabase(const std::wstring& txtPathW,
+static bool RebuildDatabase(XMPFILE txtFile,
     const std::wstring& dbPathW)
 {
     // Remove any old DB
@@ -172,44 +209,67 @@ static bool RebuildDatabase(const std::wstring& txtPathW,
         "mod","s3m","xm","it","mo3","mtm","umx"
     };
 
-    // Read & parse line-by-line
-    std::wifstream in(txtPathW);
-    in.imbue(std::locale(in.getloc(), new std::codecvt_utf8<wchar_t>));
-    std::wstring line;
-    while (std::getline(in, line)) {
-        // split off size
-        auto tab = line.find(L'\t');
-        if (tab == std::wstring::npos) continue;
-        std::wstring wsiz = line.substr(0, tab);
-        std::wstring rest = line.substr(tab + 1);
+    const int CHUNK = 16 * 1024;
+    char  chunkBuf[CHUNK];
+    std::string carry;  // holds partial line across reads
 
-        // extension
-        auto dot = rest.rfind(L'.');
-        if (dot == std::wstring::npos) continue;
-        std::string ext = ws2utf8(rest.substr(dot + 1));
-        if (!allowed.count(ext)) continue;
+    while (true) {
+        int bytes = xmpffile->Read(txtFile, chunkBuf, CHUNK);
+        if (bytes <= 0) break;
+        carry.append(chunkBuf, bytes);
 
-        // first/last slash
-        auto firstSlash = rest.find(L'/');
-        auto lastSlash = rest.rfind(L'/');
-        if (firstSlash == std::wstring::npos || lastSlash == firstSlash)
-            continue;
+        size_t pos;
+        while ((pos = carry.find('\n')) != std::string::npos) {
+            std::string line8 = carry.substr(0, pos);
+            carry.erase(0, pos + 1);
 
-        std::wstring tracker = rest.substr(0, firstSlash);
-        std::wstring artist = rest.substr(firstSlash + 1,
-            lastSlash - firstSlash - 1);
-        std::wstring song = rest.substr(lastSlash + 1);
+            // trim trailing '\r'
+            if (!line8.empty() && line8.back() == '\r')
+                line8.pop_back();
 
-        // Bind UTF-8 params
-        sqlite3_bind_text(ins, 1, ws2utf8(tracker).c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(ins, 2, ext.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(ins, 3, ws2utf8(artist).c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(ins, 4, ws2utf8(song).c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(ins, 5, ws2utf8(rest).c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(ins, 6, std::wcstoll(wsiz.c_str(), nullptr, 10));
+            // convert UTF-8 → UTF-16
+            int wlen = MultiByteToWideChar(
+                CP_UTF8, 0, line8.c_str(), -1, nullptr, 0
+            );
+            if (wlen <= 0) continue;
+            std::wstring lineW(wlen, L'\0');
+            MultiByteToWideChar(
+                CP_UTF8, 0, line8.c_str(), -1, &lineW[0], wlen
+            );
+            if (!lineW.empty() && lineW.back() == L'\0')
+                lineW.pop_back();  // drop the extra NUL
 
-        sqlite3_step(ins);
-        sqlite3_reset(ins);
+            // --- 4) Your existing parsing + binding logic: ---
+            auto tab = lineW.find(L'\t');
+            if (tab == std::wstring::npos) continue;
+            std::wstring wsiz = lineW.substr(0, tab);
+            std::wstring rest = lineW.substr(tab + 1);
+
+            auto dot = rest.rfind(L'.');
+            if (dot == std::wstring::npos) continue;
+            std::string ext = ws2utf8(rest.substr(dot + 1));
+            if (!allowed.count(ext)) continue;
+
+            auto firstSlash = rest.find(L'/');
+            auto lastSlash = rest.rfind(L'/');
+            if (firstSlash == std::wstring::npos ||
+                lastSlash == firstSlash) continue;
+
+            std::wstring tracker = rest.substr(0, firstSlash);
+            std::wstring artist = rest.substr(firstSlash + 1,
+                lastSlash - firstSlash - 1);
+            std::wstring song = rest.substr(lastSlash + 1);
+
+            sqlite3_bind_text(ins, 1, ws2utf8(tracker).c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(ins, 2, ext.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(ins, 3, ws2utf8(artist).c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(ins, 4, ws2utf8(song).c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(ins, 5, ws2utf8(rest).c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(ins, 6, std::wcstoll(wsiz.c_str(), nullptr, 10));
+
+            sqlite3_step(ins);
+            sqlite3_reset(ins);
+        }
     }
 
     // Finish up
@@ -297,11 +357,11 @@ static unsigned __stdcall RebuildThread(void* pv)
 
     // 2) Descarga
     xmpfmisc->ShowBubble("Downloading allmods…", 1000);
-    XMPFILE file = xmpffile->Open("https://modland.com/allmods.zip|allmods.txt");
-    if (file) {
+    XMPFILE txtFile = xmpffile->Open("https://modland.com/allmods.zip|allmods.txt");
+    if (txtFile) {
         // read and process file here
         xmpfmisc->ShowBubble("Rebuilding DB…", 1000);
-        if (RebuildDatabase(txt, newDb))
+        if (RebuildDatabase(txtFile, newDb))
         {
             // 5) Swap
             xmpfmisc->ShowBubble("Swapping in new DB…", 1000);
@@ -311,7 +371,7 @@ static unsigned __stdcall RebuildThread(void* pv)
             }
         }
 
-        xmpffile->Close(file);
+        xmpffile->Close(txtFile);
     }
 
     // 6) Notificar resultado y liberar memoria
@@ -881,9 +941,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                         pathUtf8, sizeof(pathUtf8),
                         nullptr, nullptr
                     );
-
-                    // 3) Construir URL y comando DDE
-                    std::string url = std::string("https://modland.com/pub/modules/") + pathUtf8;
+                    std::string url = url_encode("https://modland.com/pub/modules/" + std::string(pathUtf8));
                     std::string ddeCmd = "[list(" + url + ")]";
 
                     // 4) Enviar a XMPlay
@@ -1049,7 +1107,17 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                             fileBuf, sizeof(fileBuf),
                             nullptr, nullptr
                         );
-                        std::string url = "https://modland.com/pub/modules/" + std::string(fileBuf);
+                        std::string pathUtf8(fileBuf);
+                        std::string url = url_encode("https://modland.com/pub/modules/" + std::string(pathUtf8));
+
+                        // *** DEBUG: show the encoded URL ***
+                        MessageBoxA(
+                            NULL,
+                            url.c_str(),
+                            "Encoded URL",
+                            MB_OK | MB_ICONINFORMATION
+                        );
+
                         std::string ddeCmd;
                         if (GetKeyState(VK_MENU) & 0x8000) {
                             ddeCmd = "[open(" + url + ")]";
@@ -1129,7 +1197,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                             ListView_GetItemText(hList, idx, 3, wpath, MAX_PATH);
                             char pathUtf8[MAX_PATH];
                             WideCharToMultiByte(CP_UTF8, 0, wpath, -1, pathUtf8, sizeof(pathUtf8), nullptr, nullptr);
-                            std::string url = "https://modland.com/pub/modules/" + std::string(pathUtf8);
+                            std::string url = url_encode("https://modland.com/pub/modules/" + std::string(pathUtf8));
                             std::string ddeCmd = "[open(" + url + ")]";
                             xmpfmisc->DDE(ddeCmd.c_str());
                         }
@@ -1142,7 +1210,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                             ListView_GetItemText(hList, idx, 3, wpath, MAX_PATH);
                             char pathUtf8[MAX_PATH];
                             WideCharToMultiByte(CP_UTF8, 0, wpath, -1, pathUtf8, sizeof(pathUtf8), nullptr, nullptr);
-                            std::string url = "https://modland.com/pub/modules/" + std::string(pathUtf8);
+                            std::string url = url_encode("https://modland.com/pub/modules/" + std::string(pathUtf8));
                             std::string ddeCmd = "[list(" + url + ")]";
                             xmpfmisc->DDE(ddeCmd.c_str());
                         }

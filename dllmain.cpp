@@ -601,8 +601,16 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
         char buf[256];
         WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, buf, sizeof(buf), nullptr, nullptr);
         std::string query = std::string(buf);
-        if (!exact)
+        // only append ‘*’ if
+        //  1) the user didn’t request exact,
+        //  2) they haven’t wrapped the query in quotes,
+        //  3) and it doesn’t already end with ‘*’
+        if (!exact
+            && !(query.size() >= 2 && query.front() == '"' && query.back() == '"')
+            && !query.empty() && query.back() != '*')
+        {
             query.push_back('*');
+        }
 
         // 2) Preparar la consulta FTS5 con ORDER BY artist, bm25
         std::string orderBy;

@@ -53,7 +53,7 @@ static HWND hWndXMP;
 
 static sqlite3* g_db = nullptr;
 
-static int g_colInitWidth[4] = { 0, 0, 0, 0 };
+static int g_colInitWidth[5] = { 0, 0, 0, 0, 0 };
 
 #define WM_DB_REBUILT    (WM_APP + 100)
 
@@ -67,6 +67,7 @@ static const char* g_colNames[] = {
     "extension",  // columna 0
     "artist",     // columna 1
     "song",       // columna 2
+    "size",
     "full_path"   // columna 3
 };
 static int  g_sortColumn = -1;   // -1 = sin ordenar todavía
@@ -87,6 +88,21 @@ struct CtrlInfo {
 };
 static RECT               g_rcInitClient;
 static std::map<int, CtrlInfo> g_mapCtrls;
+
+static std::wstring HumanSize(sqlite3_int64 bytes)
+{
+    const wchar_t* units[] = { L"B", L"KB", L"MB", L"GB", L"TB" };
+    double size = static_cast<double>(bytes);
+    int unit = 0;
+    while (size >= 1024.0 && unit < 4) {
+        size /= 1024.0;
+        ++unit;
+    }
+    wchar_t buf[64];
+    // swprintf_s is the MSVC‐safe version of swprintf
+    swprintf_s(buf, _countof(buf), L"%.1f %s", size, units[unit]);
+    return buf;
+}
 
 // -- URL encode
 
@@ -536,7 +552,7 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
 
         // Build the SQL
         std::string sql =
-            "SELECT UPPER(extension), artist, song, full_path "
+            "SELECT UPPER(extension), artist, song, size, full_path "
             "FROM modland";
         if (hasFilter) {
             sql += " WHERE extension = ?1";
@@ -591,14 +607,13 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
 
         // Monta el SQL con ORDER BY dinámico
         std::string sql =
-            "SELECT upper(extension), artist, song, full_path "
+            "SELECT upper(extension), artist, song, size, full_path "
             "FROM modland "
             "WHERE " + std::string(column) + " MATCH ?1 ";
 
         if (std::string(format) != "any") {
             sql += "AND extension = ?2 ";
         }
-
 
         sql +=
             "ORDER BY " + orderBy + " "
@@ -643,7 +658,8 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
         const char* ext = (const char*)sqlite3_column_text(stmt, 0);
         const char* artist = (const char*)sqlite3_column_text(stmt, 1);
         const char* song = (const char*)sqlite3_column_text(stmt, 2);
-        const char* path = (const char*)sqlite3_column_text(stmt, 3);
+        sqlite3_int64 sz = sqlite3_column_int64(stmt, 3);
+        const char* path = (const char*)sqlite3_column_text(stmt, 4);
 
         // Convertir a UTF-16 para el ListViewW
         wchar_t wExt[128], wArtist[128], wSong[128], wPath[MAX_PATH];
@@ -653,17 +669,23 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
         MultiByteToWideChar(CP_UTF8, 0, path, -1, wPath, _countof(wPath));
 
         // 4.1) Insertar columna 0 (extension)
-        LVITEMW item = { 0 };
-        item.mask = LVIF_TEXT;
+        LVITEMW item = {};
+        item.mask = LVIF_TEXT | LVIF_PARAM;
         item.iItem = index;
         item.iSubItem = 0;
         item.pszText = wExt;
+        item.lParam = static_cast<LPARAM>(sz);      // raw byte count
         ListView_InsertItem(hList, &item);
 
-        // 4.2) Rellenar subitems 1..3
+        // 2) Fill columns 1…4
         ListView_SetItemText(hList, index, 1, wArtist);
         ListView_SetItemText(hList, index, 2, wSong);
-        ListView_SetItemText(hList, index, 3, wPath);
+
+        // your HumanSize() returns L"1.2 MB" etc.
+        std::wstring human = HumanSize(sz);
+        ListView_SetItemText(hList, index, 3, const_cast<LPWSTR>(human.c_str()));
+
+        ListView_SetItemText(hList, index, 4, wPath);
 
         ++index;
     }
@@ -758,14 +780,36 @@ static void DoRandomArtist(HWND hDlg)
 static int CALLBACK ListCompare(LPARAM l1, LPARAM l2, LPARAM lp)
 {
     const SortData* sd = reinterpret_cast<SortData*>(lp);
-    WCHAR text1[512]{}, text2[512]{};
 
-    ListView_GetItemText(sd->hList, (int)l1, sd->column, text1, _countof(text1));
-    ListView_GetItemText(sd->hList, (int)l2, sd->column, text2, _countof(text2));
+    // If we’re sorting by the “Size” column, use the raw lParam
+    if (sd->column == 3) {
+        LVITEMW a = {};
+        a.mask = LVIF_PARAM;
+        a.iItem = static_cast<int>(l1);
+        // sub‐item doesn’t really matter for LVIF_PARAM, but it’s good practice:
+        a.iSubItem = sd->column;
+        ListView_GetItem(sd->hList, &a);
 
-    int cmp = _wcsicmp(text1, text2);      // comparación UTF-16 “case-insensitive”
-    if (!sd->asc) cmp = -cmp;              // invertir si descendente
-    return cmp;
+        LVITEMW b = {};
+        b.mask = LVIF_PARAM;
+        b.iItem = static_cast<int>(l2);
+        b.iSubItem = sd->column;
+        ListView_GetItem(sd->hList, &b);
+
+        int64_t s1 = static_cast<int64_t>(a.lParam);
+        int64_t s2 = static_cast<int64_t>(b.lParam);
+        if (s1 < s2) return sd->asc ? -1 : 1;
+        if (s1 > s2) return sd->asc ? 1 : -1;
+        return 0;
+    }
+
+    // Otherwise, compare the text in the given column
+    WCHAR text1[512] = {}, text2[512] = {};
+    ListView_GetItemText(sd->hList, static_cast<int>(l1), sd->column, text1, _countof(text1));
+    ListView_GetItemText(sd->hList, static_cast<int>(l2), sd->column, text2, _countof(text2));
+
+    int cmp = _wcsicmp(text1, text2);
+    return sd->asc ? cmp : -cmp;
 }
 
 static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -808,7 +852,14 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
             SetDlgItemTextW(hDlg, IDC_STATIC_COUNT, L"0 results");
 
             HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
-            //--- estilos extendidos ---
+
+            // 1) Clear the virtual-list style and ensure REPORT mode:
+            LONG_PTR style = GetWindowLongPtr(hList, GWL_STYLE);
+            style &= ~LVS_OWNERDATA;   // remove owner-data (virtual) bit
+            style |= LVS_REPORT;      // make sure it’s report view
+            SetWindowLongPtr(hList, GWL_STYLE, style);
+
+            // 2) Now set your extended styles:
             DWORD ex = ListView_GetExtendedListViewStyle(hList);
             ex |= LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER;
             ListView_SetExtendedListViewStyle(hList, ex);
@@ -818,7 +869,8 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
             col.cx = 40; col.pszText = const_cast<LPWSTR>(TEXT("Ext"));        ListView_InsertColumn(hList, 0, &col); g_colInitWidth[0] = col.cx;
             col.cx = 120; col.pszText = const_cast<LPWSTR>(TEXT("Artist"));    ListView_InsertColumn(hList, 1, &col); g_colInitWidth[1] = col.cx;
             col.cx = 140; col.pszText = const_cast<LPWSTR>(TEXT("Song"));      ListView_InsertColumn(hList, 2, &col); g_colInitWidth[2] = col.cx;
-            col.cx = 300; col.pszText = const_cast<LPWSTR>(TEXT("Full Path")); ListView_InsertColumn(hList, 3, &col); g_colInitWidth[3] = col.cx;
+            col.cx = 80; col.pszText = const_cast<LPWSTR>(TEXT("Size"));      ListView_InsertColumn(hList, 3, &col); g_colInitWidth[3] = col.cx;
+            col.cx = 300; col.pszText = const_cast<LPWSTR>(TEXT("Full Path")); ListView_InsertColumn(hList, 4, &col); g_colInitWidth[4] = col.cx;
 
             // 2) Subclasificar el EDIT para detectar Enter
             HWND hEdit = GetDlgItem(hDlg, IDC_EDIT_SEARCH);
@@ -929,9 +981,9 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                 HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
                 int itemCount = ListView_GetItemCount(hList);
                 for (int i = 0; i < itemCount; ++i) {
-                    // 1) Obtener full_path (columna 3) en UTF-16
+                    // 1) Obtener full_path (columna 4) en UTF-16
                     WCHAR wpath[MAX_PATH];
-                    ListView_GetItemText(hList, i, 3, wpath, MAX_PATH);
+                    ListView_GetItemText(hList, i, 4, wpath, MAX_PATH);
 
                     // 2) Convertir a UTF-8
                     char pathUtf8[MAX_PATH];
@@ -1099,7 +1151,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                     int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
                     if (sel != -1) {
                         WCHAR wbuf[MAX_PATH];
-                        ListView_GetItemText(hList, sel, 3, wbuf, MAX_PATH);
+                        ListView_GetItemText(hList, sel, 4, wbuf, MAX_PATH);
                         char fileBuf[MAX_PATH];
                         WideCharToMultiByte(
                             CP_UTF8, 0,
@@ -1109,14 +1161,6 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                         );
                         std::string pathUtf8(fileBuf);
                         std::string url = url_encode("https://modland.com/pub/modules/" + std::string(pathUtf8));
-
-                        // *** DEBUG: show the encoded URL ***
-                        MessageBoxA(
-                            NULL,
-                            url.c_str(),
-                            "Encoded URL",
-                            MB_OK | MB_ICONINFORMATION
-                        );
 
                         std::string ddeCmd;
                         if (GetKeyState(VK_MENU) & 0x8000) {
@@ -1165,6 +1209,9 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                     msel += L"\"";
                     AppendMenuW(hPop, MF_STRING, ID_CONTEXT_SEARCH_ARTIST, msel.c_str());
 
+                    AppendMenuW(hPop, MF_STRING, ID_CONTEXT_COPY_URL, L"Copy song URL to clipboard");
+
+
                     // 5) si hay más de uno, grayea “Open”
                     if (selCount > 1) {
                         EnableMenuItem(
@@ -1194,7 +1241,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                         int idx = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
                         if (idx != -1) {
                             WCHAR wpath[MAX_PATH];
-                            ListView_GetItemText(hList, idx, 3, wpath, MAX_PATH);
+                            ListView_GetItemText(hList, idx, 4, wpath, MAX_PATH);
                             char pathUtf8[MAX_PATH];
                             WideCharToMultiByte(CP_UTF8, 0, wpath, -1, pathUtf8, sizeof(pathUtf8), nullptr, nullptr);
                             std::string url = url_encode("https://modland.com/pub/modules/" + std::string(pathUtf8));
@@ -1207,7 +1254,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                         int idx = -1;
                         while ((idx = ListView_GetNextItem(hList, idx, LVNI_SELECTED)) != -1) {
                             WCHAR wpath[MAX_PATH];
-                            ListView_GetItemText(hList, idx, 3, wpath, MAX_PATH);
+                            ListView_GetItemText(hList, idx, 4, wpath, MAX_PATH);
                             char pathUtf8[MAX_PATH];
                             WideCharToMultiByte(CP_UTF8, 0, wpath, -1, pathUtf8, sizeof(pathUtf8), nullptr, nullptr);
                             std::string url = url_encode("https://modland.com/pub/modules/" + std::string(pathUtf8));
@@ -1227,6 +1274,51 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                         );
                         // 3) do an exact search
                         DoSearch(hDlg, /*exact=*/true);
+                    }
+                    else if (cmd == ID_CONTEXT_COPY_URL) {
+                        // 1) pull the UTF-16 path from column 4
+                        WCHAR wbuf[MAX_PATH];
+                        ListView_GetItemText(hList, idx, 4, wbuf, _countof(wbuf));
+
+                        // 2) UTF-16 → UTF-8
+                        char pathUtf8[MAX_PATH * 3];
+                        WideCharToMultiByte(
+                            CP_UTF8, 0,
+                            wbuf, -1,
+                            pathUtf8, sizeof(pathUtf8),
+                            nullptr, nullptr
+                        );
+
+                        // 3) URL-escape
+                        std::string url = url_encode("https://modland.com/pub/modules/" + std::string(pathUtf8));
+
+                        // 4) UTF-8 → UTF-16 so we can put it on the clipboard
+                        int needed = MultiByteToWideChar(
+                            CP_UTF8, 0,
+                            url.c_str(), -1,
+                            nullptr, 0
+                        );
+                        std::wstring wurl(needed, L'\0');
+                        MultiByteToWideChar(
+                            CP_UTF8, 0,
+                            url.c_str(), -1,
+                            &wurl[0], needed
+                        );
+
+                        // 5) Copy to clipboard
+                        if (OpenClipboard(hDlg)) {
+                            EmptyClipboard();
+                            size_t cb = (wurl.size() + 1) * sizeof(wchar_t);
+                            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, cb);
+                            if (hMem) {
+                                memcpy(GlobalLock(hMem), wurl.c_str(), cb);
+                                GlobalUnlock(hMem);
+                                SetClipboardData(CF_UNICODETEXT, hMem);
+                            }
+                            CloseClipboard();
+                        }
+
+                        return TRUE;
                     }
                     return TRUE;
                 }

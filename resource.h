@@ -22,6 +22,7 @@
 #define ID_CONTEXT_OPEN                 40002
 #define ID_CONTEXT_ADD                  40003
 #define ID_CONTEXT_SEARCH_ARTIST        40004
+#define ID_CONTEXT_COPY_URL             40005
 
 // Next default values for new objects
 // 

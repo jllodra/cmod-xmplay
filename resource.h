@@ -17,9 +17,7 @@
 #define IDC_BUTTON_REBUILD              1014
 #define IDC_BUTTON_ARTIST               1015
 #define IDC_BUTTON_SONGS                1016
-#define IDC_SONGS_NUMBER                1017
 #define IDC_COMBO_NUMBER                1017
-#define IDC_BUTTON1                     1018
 #define IDC_BUTTON_REBUILD_ALL          1018
 #define ID_CONTEXT_OPEN                 40002
 #define ID_CONTEXT_ADD                  40003

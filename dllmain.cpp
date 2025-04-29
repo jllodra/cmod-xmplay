@@ -327,9 +327,14 @@ static bool SwapInNewDatabase()
     }
 
     // 3) Replace files on disk
-    ::DeleteFileW(oldDb.c_str());
-    if (!::MoveFileW(newDb.c_str(), oldDb.c_str()))
+    // ::DeleteFileW(oldDb.c_str());
+    if (!::MoveFileExW(newDb.c_str(), oldDb.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DWORD err = ::GetLastError();
+        wchar_t buf[128];
+        swprintf_s(buf, L"MoveFileW failed with 0x%08X", err);
+        MessageBoxW(NULL, buf, L"SwapInNewDatabase", MB_OK | MB_ICONERROR);
         return false;
+    }
 
     // 4) Re-open into g_db
     std::string oldDbUtf8 = ws2utf8(oldDb);
@@ -1099,6 +1104,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                 1000
             );
             EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), TRUE);
+            EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD_ALL), TRUE);
             return TRUE;
         }
 

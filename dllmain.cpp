@@ -1,5 +1,6 @@
 #include "pch.h"
 
+#include <ctime>
 #include <process.h>
 #include <string>
 #include <cstdlib>
@@ -36,7 +37,8 @@ static DWORD WINAPI    Plugin_GetConfig(void* inst, void* config);
 static BOOL WINAPI     Plugin_SetConfig(void* inst, void* config, DWORD size);
 static BOOL CALLBACK   SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
 static void WINAPI     OpenSearchShortcut(void);
-static void DoSearch(HWND hDlg);
+static bool EnsureDatabaseOpen(HWND hDlg);
+static void DoSearch(HWND hDlg, bool exact = false, int randomCount = 0);
 
 struct PluginConfig {
 };
@@ -436,163 +438,183 @@ static LRESULT CALLBACK EditSubclassProc(
     return DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
-static void DoSearch(HWND hDlg) {
-    if (!g_db) {
-        wchar_t modulePath[MAX_PATH];
-        GetModuleFileNameW(hInstance, modulePath, MAX_PATH);
-        PathRemoveFileSpecW(modulePath);
-        std::wstring dir = modulePath;
-        std::wstring dbPath = dir + L"\\cmod.db";
+static bool EnsureDatabaseOpen(HWND hDlg)
+{
+    if (g_db)
+        return true;
 
-        std::string dbPathUtf8 = ws2utf8(dbPath);
+    // Compute path to cmod.db
+    wchar_t modulePath[MAX_PATH];
+    GetModuleFileNameW(hInstance, modulePath, MAX_PATH);
+    PathRemoveFileSpecW(modulePath);
+    std::wstring dbPath = std::wstring(modulePath) + L"\\cmod.db";
 
-        int rc = sqlite3_open_v2(
-            dbPathUtf8.c_str(),
-            &g_db,
-            SQLITE_OPEN_READONLY,  // only open existing DB for reading
-            nullptr                // use default VFS
-        );
+    // UTF-8 for sqlite
+    std::string dbUtf8 = ws2utf8(dbPath);
 
-        if (rc != SQLITE_OK) {
-            // 1) Get the UTF-8 error message
-            const char* errA = sqlite3_errmsg(g_db);
+    // Try opening read-only
+    int rc = sqlite3_open_v2(
+        dbUtf8.c_str(),
+        &g_db,
+        SQLITE_OPEN_READONLY,
+        nullptr
+    );
+    if (rc == SQLITE_OK)
+        return true;
 
-            // 2) Convert it to UTF-16
-            int needed = MultiByteToWideChar(
-                CP_UTF8, 0,
-                errA, -1,
-                nullptr, 0
-            );
-            std::wstring errW;
-            errW.resize(needed);
-            MultiByteToWideChar(
-                CP_UTF8, 0,
-                errA, -1,
-                &errW[0], needed
-            );
+    // On error, pull the UTF-8 msg, convert, and show
+    const char* errA = sqlite3_errmsg(g_db);
+    sqlite3_close(g_db);
+    g_db = nullptr;
 
-            // 3) Show MessageBoxW with the path and error
-            std::wstring msg = L"Error opening BD in:\n - Click on Rebuild DB, wait, and try again";
-            msg += dbPath;
-            msg += L"\n\nSQLite error:\n";
-            msg += errW;
+    int needed = MultiByteToWideChar(CP_UTF8, 0, errA, -1, nullptr, 0);
+    std::wstring errW(needed, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, errA, -1, &errW[0], needed);
 
-            MessageBoxW(
-                NULL,
-                msg.c_str(),
-                L"SQLite Error",
-                MB_OK | MB_ICONERROR
-            );
+    std::wstring msg =
+        L"Error opening database:\n" + dbPath +
+        L"\n\nSQLite error:\n" + errW +
+        L"\n\nClick Rebuild DB, wait a moment, and try again.";
+    MessageBoxW(hDlg, msg.c_str(), L"SQLite Error", MB_OK | MB_ICONERROR);
 
-            // 4) Cleanup
-            sqlite3_close(g_db);
-            g_db = nullptr;
-        }
-    }
+    return false;
+}
 
-    if (!g_db) {
-        MessageBoxW(NULL,
-            L"g_db is NULL – database not yet open!",
-            L"Debug",
-            MB_OK | MB_ICONERROR);
-        return;
-    }
+static void DoSearch(HWND hDlg, bool exact, int randomCount) {
+    if (!EnsureDatabaseOpen(hDlg))
+        return;    // if it failed, we already showed an error
 
     HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
     ListView_DeleteAllItems(hList);
-
-    // 1) Leer búsqueda (UTF-16) y convertir a UTF-8 + wildcard
-    wchar_t wbuf[256];
-    GetDlgItemTextW(hDlg, IDC_EDIT_SEARCH, wbuf, _countof(wbuf));
-
-    char buf[256];
-    WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, buf, sizeof(buf), nullptr, nullptr);
-    std::string query = std::string(buf) + "*";
 
     // 2) Determinar columna a usar
     HWND hComboSearch = GetDlgItem(hDlg, IDC_COMBO_SEARCH);
     int sel = (int)SendMessageW(hComboSearch, CB_GETCURSEL, 0, 0);
     const char* column;
     switch (sel) {
-        case 0:  column = "artist"; break;
-        case 1:  column = "song"; break;
-        case 2:  column = "modland";   break;
-        default: column = "modland"; // All: toda la tabla FTS5
+    case 0:  column = "artist"; break;
+    case 1:  column = "song"; break;
+    case 2:  column = "modland";   break;
+    default: column = "modland"; // All: toda la tabla FTS5
     }
 
     HWND hComboFormat = GetDlgItem(hDlg, IDC_COMBO_FORMAT);
     sel = (int)SendMessageW(hComboFormat, CB_GETCURSEL, 0, 0);
     const char* format;
     switch (sel) {
-        case 0:  format = "any"; break;
-        case 1:  format = "it"; break;
-        case 2:  format = "xm";   break;
-        case 3:  format = "s3m"; break;
-        case 4:  format = "mod";   break;
-        default: format = "any"; // All: toda la tabla FTS5
+    case 0:  format = "any"; break;
+    case 1:  format = "it"; break;
+    case 2:  format = "xm";   break;
+    case 3:  format = "s3m"; break;
+    case 4:  format = "mod";   break;
+    default: format = "any"; // All: toda la tabla FTS5
     }
-
-    // 2) Preparar la consulta FTS5 con ORDER BY artist, bm25
-    std::string orderBy;
-
-    // ¿Hay una columna activa para ordenar?
-    if (g_sortColumn >= 0 && g_sortColumn < 4) {
-        // p.ej. "artist COLLATE NOCASE DESC"
-        orderBy = std::string(g_colNames[g_sortColumn])
-            + " COLLATE NOCASE "
-            + (g_sortAsc ? "ASC" : "DESC")
-            + ", bm25(modland) ASC";
-    }
-    else {
-        // default si no se ha pinchado ninguna columna
-        orderBy = "artist COLLATE NOCASE ASC, bm25(modland) ASC";
-    }
-
-    // Monta el SQL con ORDER BY dinámico
-    std::string sql =
-        "SELECT upper(extension), artist, song, full_path "
-        "FROM modland "
-        "WHERE " + std::string(column) + " MATCH ?1 ";
-
-    if (std::string(format) != "any") {
-        sql += "AND extension = ?2 ";
-    }
-
-
-    sql +=
-        "ORDER BY " + orderBy + " "
-        "LIMIT 1000;";
 
     sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(g_db, sql.c_str(), -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        const char* errMsg = sqlite3_errmsg(g_db);
+    if (randomCount > 0) {
+        // ---- RANDOM SONGS PATH ----
+        bool hasFilter = (std::string(format) != "any");
 
-        std::string fullMsg;
-        fullMsg.reserve(sql.size() + strlen(errMsg) + 64);
-        fullMsg = "When preparing the query:\n";
-        fullMsg += sql;
-        fullMsg += "\n\nSQLite error:\n";
-        fullMsg += errMsg;
+        // Build the SQL
+        std::string sql =
+            "SELECT UPPER(extension), artist, song, full_path "
+            "FROM modland";
+        if (hasFilter) {
+            sql += " WHERE extension = ?1";
+            sql += " ORDER BY random() LIMIT ?2;";
+        }
+        else {
+            sql += " ORDER BY random() LIMIT ?1;";
+        }
 
-        MessageBoxA(
-            NULL,
-            fullMsg.c_str(),
-            "SQLite error",
-            MB_OK | MB_ICONERROR
-        );
-
-        if (stmt) sqlite3_finalize(stmt);
-
-        return;
+        if (sqlite3_prepare_v2(g_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            MessageBoxA(NULL, sqlite3_errmsg(g_db),
+                "SQLite prepare (random)", MB_OK | MB_ICONERROR);
+            return;
+        }
+        if (hasFilter) {
+            // 1st param = format string
+            sqlite3_bind_text(stmt, 1, format, -1, SQLITE_TRANSIENT);
+            // 2nd param = count limit
+            sqlite3_bind_int(stmt, 2, randomCount);
+        }
+        else {
+            // Only one param: limit
+            sqlite3_bind_int(stmt, 1, randomCount);
+        }
     }
+    else {
+        // 1) Leer búsqueda (UTF-16) y convertir a UTF-8 + wildcard
+        wchar_t wbuf[256];
+        GetDlgItemTextW(hDlg, IDC_EDIT_SEARCH, wbuf, _countof(wbuf));
+
+        char buf[256];
+        WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, buf, sizeof(buf), nullptr, nullptr);
+        std::string query = std::string(buf);
+        if (!exact)
+            query.push_back('*');
+
+        // 2) Preparar la consulta FTS5 con ORDER BY artist, bm25
+        std::string orderBy;
+
+        // ¿Hay una columna activa para ordenar?
+        if (g_sortColumn >= 0 && g_sortColumn < 4) {
+            // p.ej. "artist COLLATE NOCASE DESC"
+            orderBy = std::string(g_colNames[g_sortColumn])
+                + " COLLATE NOCASE "
+                + (g_sortAsc ? "ASC" : "DESC")
+                + ", bm25(modland) ASC";
+        }
+        else {
+            // default si no se ha pinchado ninguna columna
+            orderBy = "artist COLLATE NOCASE ASC, bm25(modland) ASC";
+        }
+
+        // Monta el SQL con ORDER BY dinámico
+        std::string sql =
+            "SELECT upper(extension), artist, song, full_path "
+            "FROM modland "
+            "WHERE " + std::string(column) + " MATCH ?1 ";
+
+        if (std::string(format) != "any") {
+            sql += "AND extension = ?2 ";
+        }
 
 
-    // 3) Binder parámetro
-    sqlite3_bind_text(stmt, 1, query.c_str(), -1, SQLITE_TRANSIENT);
+        sql +=
+            "ORDER BY " + orderBy + " "
+            "LIMIT 1000;";
 
-    if (std::string(format) != "any") {
-        sqlite3_bind_text(stmt, 2, format, -1, SQLITE_TRANSIENT);
+        int rc = sqlite3_prepare_v2(g_db, sql.c_str(), -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            const char* errMsg = sqlite3_errmsg(g_db);
+
+            std::string fullMsg;
+            fullMsg.reserve(sql.size() + strlen(errMsg) + 64);
+            fullMsg = "When preparing the query:\n";
+            fullMsg += sql;
+            fullMsg += "\n\nSQLite error:\n";
+            fullMsg += errMsg;
+
+            MessageBoxA(
+                NULL,
+                fullMsg.c_str(),
+                "SQLite error",
+                MB_OK | MB_ICONERROR
+            );
+
+            if (stmt) sqlite3_finalize(stmt);
+
+            return;
+        }
+
+
+        // 3) Binder parámetro
+        sqlite3_bind_text(stmt, 1, query.c_str(), -1, SQLITE_TRANSIENT);
+
+        if (std::string(format) != "any") {
+            sqlite3_bind_text(stmt, 2, format, -1, SQLITE_TRANSIENT);
+        }
     }
 
     // 4) Recorrer resultados e insertarlos en el ListView
@@ -639,6 +661,81 @@ static void DoSearch(HWND hDlg) {
     SetDlgItemTextW(hDlg, IDC_STATIC_COUNT, txt.c_str());
 }
 
+static void DoRandomArtist(HWND hDlg)
+{
+    if (!EnsureDatabaseOpen(hDlg))
+        return;    // if it failed, we already showed an error
+
+    // 1) Count distinct artists
+    int total = 0;
+    {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(g_db,
+            "SELECT COUNT(DISTINCT artist) FROM modland;", -1, &stmt, nullptr) == SQLITE_OK)
+        {
+            if (sqlite3_step(stmt) == SQLITE_ROW)
+                total = sqlite3_column_int(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    if (total <= 0) return;
+
+    // 2) Pick a random index
+    int idx = std::rand() % total;
+
+    // 3) Fetch the artist at that offset
+    std::wstring artistStr;                // <-- our own copy
+    {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(
+            g_db,
+            "SELECT DISTINCT artist FROM modland LIMIT 1 OFFSET ?1;",
+            -1, &stmt, nullptr
+        ) == SQLITE_OK)
+        {
+            sqlite3_bind_int(stmt, 1, idx);
+            if (sqlite3_step(stmt) == SQLITE_ROW)
+            {
+                // Grab the UTF-16 LE blob
+                const void* blob = sqlite3_column_text16(stmt, 0);
+                if (blob)
+                {
+                    const wchar_t* raw = reinterpret_cast<const wchar_t*>(blob);
+                    // Strip off BOM if present
+                    if (raw[0] == 0xFEFF || raw[0] == 0xFFFE)
+                        ++raw;
+                    // Copy into our own string
+                    artistStr = raw;
+                }
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    if (artistStr.empty())
+    {
+        MessageBoxW(hDlg,
+            L"No artist found at that offset!",
+            L"Debug", MB_OK);
+        return;
+    }
+
+    // Debug: show the artist we copied
+    /*MessageBoxW(hDlg, artistStr.c_str(),
+        L"Debug Artist (copied UTF-16)", MB_OK);*/
+
+    // 4) Stuff into the UI and re-run DoSearch
+    SetDlgItemTextW(hDlg, IDC_EDIT_SEARCH, artistStr.c_str());
+    SendMessageW(GetDlgItem(hDlg, IDC_COMBO_SEARCH),
+        CB_SETCURSEL, 0 /*Artist*/, 0);
+    SendMessageW(
+        GetDlgItem(hDlg, IDC_COMBO_FORMAT),
+        CB_SETCURSEL, 0 /* Any */, 0);
+    DoSearch(hDlg, /*exact=*/true);
+}
+
+
 static int CALLBACK ListCompare(LPARAM l1, LPARAM l2, LPARAM lp)
 {
     const SortData* sd = reinterpret_cast<SortData*>(lp);
@@ -668,6 +765,8 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                 { IDC_STATIC_SEARCHBY,true,false,false, false},   // idem label
                 { IDC_COMBO_FORMAT,true,  false, false, false},   // comboFormat se mueve en X
                 { IDC_STATIC_FORMAT,true,false,false, false},     // label format
+                { IDC_BUTTON_SONGS,true, false, false, false},
+                { IDC_COMBO_NUMBER,true, false, false, false},
                 { IDC_BUTTON_ADD_ALL,false,true, false, false},   // botón ADD se mueve en Y
                 { IDC_BUTTON_REBUILD, true, true, false, false},   // botón ADD se mueve en Y
                 { IDC_STATIC_COUNT, false,  true,  false, false},  // contador se mueve X e Y
@@ -724,6 +823,17 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
             SendMessageW(hComboFormat, CB_ADDSTRING, 0, (LPARAM)L"S3M");
             SendMessageW(hComboFormat, CB_ADDSTRING, 0, (LPARAM)L"MOD");
             SendMessageW(hComboFormat, CB_SETCURSEL, 0, 0);  // por defecto "Any"
+
+            HWND hComboCount = GetDlgItem(hDlg, IDC_COMBO_NUMBER);
+            SendMessageW(hComboCount, CB_RESETCONTENT, 0, 0);
+            SendMessageW(hComboCount, CB_ADDSTRING, 0, (LPARAM)L"10");
+            SendMessageW(hComboCount, CB_ADDSTRING, 0, (LPARAM)L"50");
+            SendMessageW(hComboCount, CB_ADDSTRING, 0, (LPARAM)L"100");
+            SendMessageW(hComboCount, CB_ADDSTRING, 0, (LPARAM)L"500");
+            SendMessageW(hComboCount, CB_ADDSTRING, 0, (LPARAM)L"1000");
+
+            // 2) Optionally set a default selection (e.g. “100”)
+            SendMessageW(hComboCount, CB_SETCURSEL, 2 /* zero‐based index*/, 0);
 
             // Load our plugin’s icon from resources
             HICON hIconSmall = (HICON)LoadImageW(
@@ -819,6 +929,27 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
 
                     // 4) Enviar a XMPlay
                     xmpfmisc->DDE(ddeCmd.c_str());
+                }
+                return TRUE;
+            }
+
+            case IDC_BUTTON_ARTIST:
+            {
+                DoRandomArtist(hDlg);
+                return TRUE;
+            }
+
+            case IDC_BUTTON_SONGS:
+            {
+                HWND hCombo = GetDlgItem(hDlg, IDC_COMBO_NUMBER);
+                int sel = (int)SendMessageW(hCombo, CB_GETCURSEL, 0, 0);
+                if (sel != CB_ERR)
+                {
+                    wchar_t buf[16];
+                    SendMessageW(hCombo, CB_GETLBTEXT, sel, (LPARAM)buf);
+                    int n = _wtoi(buf);
+                    if (n > 0)
+                        DoSearch(hDlg, /*exact=*/false, n);
                 }
                 return TRUE;
             }
@@ -995,10 +1126,17 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                     // 3) cuenta los seleccionados
                     int selCount = ListView_GetSelectedCount(hList);
 
+                    WCHAR artistName[MAX_PATH] = L"";
+                    ListView_GetItemText(hList, idx, 1, artistName, _countof(artistName));
+
                     // 4) crea el menú emergente
                     HMENU hPop = CreatePopupMenu();
                     AppendMenuW(hPop, MF_STRING, ID_CONTEXT_OPEN, L"Open");
                     AppendMenuW(hPop, MF_STRING, ID_CONTEXT_ADD, L"Add to playlist");
+                    std::wstring msel = L"Search artist \"";
+                    msel += artistName;
+                    msel += L"\"";
+                    AppendMenuW(hPop, MF_STRING, ID_CONTEXT_SEARCH_ARTIST, msel.c_str());
 
                     // 5) si hay más de uno, grayea “Open”
                     if (selCount > 1) {
@@ -1049,6 +1187,19 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                             std::string ddeCmd = "[list(" + url + ")]";
                             xmpfmisc->DDE(ddeCmd.c_str());
                         }
+                    }
+                    else if (cmd == ID_CONTEXT_SEARCH_ARTIST) {
+                        // 1) put artistName into the edit
+                        SetDlgItemTextW(hDlg, IDC_EDIT_SEARCH, artistName);
+                        // 2) select “Artist” in the combo
+                        SendMessageW(
+                            GetDlgItem(hDlg, IDC_COMBO_SEARCH),
+                            CB_SETCURSEL,
+                            0,  // index 0 == "Artist"
+                            0
+                        );
+                        // 3) do an exact search
+                        DoSearch(hDlg, /*exact=*/true);
                     }
                     return TRUE;
                 }
@@ -1123,6 +1274,8 @@ XMPDSP *WINAPI XMPDSP_GetInterface2(DWORD face, InterfaceProc faceproc) {
         OpenSearchShortcut
     };
     xmpfmisc->RegisterShortcut(&shortcut);
+
+    std::srand((unsigned)std::time(nullptr));
 
     return &plugin;
 }

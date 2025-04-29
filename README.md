@@ -22,7 +22,7 @@ And press a key, I have it binded to the `W` key.
 
 ## Usage
 
-![image](https://github.com/user-attachments/assets/fcd6a24d-908b-4df0-9464-dc9df7ba19e5)
+![image](https://github.com/user-attachments/assets/fc90521f-7c1b-4e5c-8e35-e9a5d28f632d)
 
 * Double click on a song: Adds it to playlist
 * Right click on a song: Opens context dialog with options

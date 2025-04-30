@@ -21,7 +21,7 @@ And press a key, I have it binded to the `W` key.
 ![image](https://github.com/user-attachments/assets/fc90521f-7c1b-4e5c-8e35-e9a5d28f632d)
 
 * Double click on a song: Adds it to playlist
-* Right click on a song: Opens context dialog with options
+* Right click on a song: Opens context dialog with options (e.g search in modarchive.com)
 * ALT + Double click on a song: Opens the song
 * "Add all to playlist" button adds all the results
 * "Rebuild db" rebuilds the modland database by parsing `allmods.zip` in http://modland.com/

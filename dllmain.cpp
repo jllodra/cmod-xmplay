@@ -12,6 +12,7 @@
 #include "resource.h"  // define IDD_SEARCH
 #include "sqlite\sqlite3.h"
 #include <Shlwapi.h>    // PathRemoveFileSpecW
+#include <shellapi.h>   // for ShellExecuteW
 #include <map>
 #include <set>
 #include <vector>
@@ -56,6 +57,9 @@ static sqlite3* g_db = nullptr;
 static int g_colInitWidth[5] = { 0, 0, 0, 0, 0 };
 
 #define WM_DB_REBUILT    (WM_APP + 100)
+
+#define IDT_SEARCH_DELAY      1
+#define SEARCH_DELAY_MS     300   // 300 ms de debounce
 
 // xmplay supported formats only (default)
 static const std::set<std::string> xmplayFormats = {
@@ -467,7 +471,8 @@ static LRESULT CALLBACK EditSubclassProc(
 
     case WM_KEYDOWN:
         if (wParam == VK_RETURN) {
-            DoSearch(GetParent(hWnd));
+            // We use the debounce timer to do the search, no need to do it manually
+            // DoSearch(GetParent(hWnd));
             return 0;  // come la tecla y no deje beep
         }
         if (wParam == VK_ESCAPE) {
@@ -902,6 +907,8 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
 
             // 2) Subclasificar el EDIT para detectar Enter
             HWND hEdit = GetDlgItem(hDlg, IDC_EDIT_SEARCH);
+            SendMessageW(hEdit, EM_SETCUEBANNER, (WPARAM)TRUE,
+                (LPARAM)L"Type 3 or more chars...");
             SetWindowSubclass(hEdit, EditSubclassProc, 0, 0);
             SetFocus(hEdit);
 
@@ -1007,8 +1014,37 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                 }
             }
         }
-
+        case WM_TIMER:
+            if (wParam == IDT_SEARCH_DELAY) {
+                KillTimer(hDlg, IDT_SEARCH_DELAY);
+                // Lanza tu búsqueda con exact=false y randomCount=0
+                DoSearch(hDlg, /*exact=*/false, /*randomCount=*/0);
+                return TRUE;
+            }
+            break;
         case WM_COMMAND: {
+            if (LOWORD(wParam) == IDC_EDIT_SEARCH && HIWORD(wParam) == EN_CHANGE) {
+                // Reinicia debounce-timer
+                KillTimer(hDlg, IDT_SEARCH_DELAY);
+
+                // 2) Lee el contenido actual
+                wchar_t buf[256];
+                GetDlgItemTextW(hDlg, IDC_EDIT_SEARCH, buf, _countof(buf));
+                size_t len = wcslen(buf);
+
+                // 3) Sólo lanzamos la búsqueda si cumple el mínimo de 3 chars
+                if (len >= 3) {
+                    // tras DEBOUNCE_MS ms sin más cambios, disparamos DoSearch
+                    SetTimer(hDlg, IDT_SEARCH_DELAY, SEARCH_DELAY_MS, nullptr);
+                }
+                else {
+                    // opcionalmente limpiamos resultados o mostramos “escribe 3 chars…”
+                    ListView_DeleteAllItems(GetDlgItem(hDlg, IDC_LIST_RESULTS));
+                    SetDlgItemTextW(hDlg, IDC_STATIC_COUNT, L"Type at least 3 letters");
+                }
+                return TRUE;
+            }
+
             switch (LOWORD(wParam)) {
             case IDC_BUTTON_ADD_ALL:
             {
@@ -1259,15 +1295,22 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
 
                     // 4) crea el menú emergente
                     HMENU hPop = CreatePopupMenu();
-                    AppendMenuW(hPop, MF_STRING, ID_CONTEXT_OPEN, L"Open");
-                    AppendMenuW(hPop, MF_STRING, ID_CONTEXT_ADD, L"Add to playlist");
+                    AppendMenuW(hPop, MF_STRING, ID_CONTEXT_OPEN, L"Open ([ALT]-double click)");
+                    AppendMenuW(hPop, MF_STRING, ID_CONTEXT_ADD, L"Add to playlist (double click)");
+                    AppendMenuW(hPop, MF_SEPARATOR, 0, NULL);
                     std::wstring msel = L"Search artist \"";
                     msel += artistName;
                     msel += L"\"";
                     AppendMenuW(hPop, MF_STRING, ID_CONTEXT_SEARCH_ARTIST, msel.c_str());
-
-                    AppendMenuW(hPop, MF_STRING, ID_CONTEXT_COPY_URL, L"Copy song URL to clipboard");
-
+                    AppendMenuW(hPop, MF_SEPARATOR, 0, NULL);
+                    AppendMenuW(hPop, MF_STRING, ID_CONTEXT_COPY_URL, L"Copy song URL (modland.com) to clipboard");
+                    AppendMenuW(hPop, MF_SEPARATOR, 0, NULL);
+                    WCHAR wSong[MAX_PATH];
+                    ListView_GetItemText(hList, idx, 2, wSong, _countof(wSong));
+                    std::wstring lblSong = L"Search \"" + std::wstring(wSong) + L"\" on ModArchive (opens browser)";
+                    std::wstring lblArtist = L"Search \"" + std::wstring(artistName) + L"\" on ModArchive (opens browser)";
+                    AppendMenuW(hPop, MF_STRING, ID_CONTEXT_SEARCH_MODARCHIVE_FILE, lblSong.c_str());
+                    AppendMenuW(hPop, MF_STRING, ID_CONTEXT_SEARCH_MODARCHIVE_ARTIST, lblArtist.c_str());
 
                     // 5) si hay más de uno, grayea “Open”
                     if (selCount > 1) {
@@ -1375,7 +1418,75 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                             }
                             CloseClipboard();
                         }
+                        return TRUE;
+                    } else if (cmd == ID_CONTEXT_SEARCH_MODARCHIVE_FILE)
+                    {
+                        // get the 'song' column (sub‐item 2)
+                        WCHAR wSong[MAX_PATH];
+                        ListView_GetItemText(hList, idx, 2, wSong, _countof(wSong));
+                        std::wstring song(wSong);
+                        auto ext = PathFindExtensionW(song.c_str());
+                        if (ext && *ext == L'.') {
+                            song.resize(ext - song.c_str());
+                        }
 
+                        // UTF-16 → UTF-8
+                        char songUtf8[3 * MAX_PATH];
+                        WideCharToMultiByte(CP_UTF8, 0, song.c_str(), -1,
+                            songUtf8, sizeof(songUtf8),
+                            nullptr, nullptr);
+
+                        // URL-encode
+                        std::string q = url_encode(songUtf8);
+
+                        // build ModArchive song/file search URL
+                        std::string url =
+                            "https://modarchive.org/index.php?"
+                            "request=search&query=" + q +
+                            "&submit=Find&search_type=filename_or_songtitle";
+
+                        // UTF-8 → UTF-16
+                        int n = MultiByteToWideChar(CP_UTF8, 0,
+                            url.c_str(), -1,
+                            nullptr, 0);
+                        std::wstring wurl(n, L'\0');
+                        MultiByteToWideChar(CP_UTF8, 0,
+                            url.c_str(), -1,
+                            &wurl[0], n);
+
+                        ShellExecuteW(NULL, L"open", wurl.c_str(), NULL, NULL, SW_SHOWNORMAL);
+                        return TRUE;
+                    }
+                    else if (cmd == ID_CONTEXT_SEARCH_MODARCHIVE_ARTIST) {
+                        // get the 'artist' column (sub‐item 1)
+                        WCHAR wArtist[MAX_PATH];
+                        ListView_GetItemText(hList, idx, 1, wArtist, _countof(wArtist));
+
+                        // UTF-16 → UTF-8
+                        char artistUtf8[3 * MAX_PATH];
+                        WideCharToMultiByte(CP_UTF8, 0, wArtist, -1,
+                            artistUtf8, sizeof(artistUtf8),
+                            nullptr, nullptr);
+
+                        // URL-encode
+                        std::string q = url_encode(artistUtf8);
+
+                        // build ModArchive artist search URL
+                        std::string url =
+                            "https://modarchive.org/index.php?"
+                            "query=" + q +
+                            "&submit=Find&request=search&search_type=guessed_artist";
+
+                        // UTF-8 → UTF-16
+                        int n = MultiByteToWideChar(CP_UTF8, 0,
+                            url.c_str(), -1,
+                            nullptr, 0);
+                        std::wstring wurl(n, L'\0');
+                        MultiByteToWideChar(CP_UTF8, 0,
+                            url.c_str(), -1,
+                            &wurl[0], n);
+
+                        ShellExecuteW(NULL, L"open", wurl.c_str(), NULL, NULL, SW_SHOWNORMAL);
                         return TRUE;
                     }
                     return TRUE;

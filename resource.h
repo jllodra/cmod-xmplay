@@ -23,6 +23,8 @@
 #define ID_CONTEXT_ADD                  40003
 #define ID_CONTEXT_SEARCH_ARTIST        40004
 #define ID_CONTEXT_COPY_URL             40005
+#define ID_CONTEXT_SEARCH_MODARCHIVE_FILE   40006
+#define ID_CONTEXT_SEARCH_MODARCHIVE_ARTIST 40007
 
 // Next default values for new objects
 // 

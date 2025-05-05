@@ -24,7 +24,7 @@ And press a key, I have it binded to the `W` key.
 * Right click on a song: Opens context dialog with options (e.g search in modarchive.com)
 * ALT + Double click on a song: Opens the song
 * "Add all to playlist" button adds all the results
-* "Rebuild db" rebuilds the modland database by parsing `allmods.zip` in http://modland.com/
+* "Rebuild db" rebuilds the modland database by parsing `allmods.zip` in http://modland.com/ - **you have to rebuild the db from time to time to get the updates and new songs uploaded to modland**
 
 ## Enable cache (optionally)
 

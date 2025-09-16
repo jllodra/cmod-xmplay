@@ -18,13 +18,13 @@ And press a key, I have it binded to the `W` key.
 
 ## Usage
 
-![image](https://github.com/user-attachments/assets/fc90521f-7c1b-4e5c-8e35-e9a5d28f632d)
+<img width="793" height="715" alt="image" src="https://github.com/user-attachments/assets/95a36ea1-16e2-4888-ad9a-27f12d7bd714" />
 
 * Double click on a song: Adds it to playlist
 * Right click on a song: Opens context dialog with options (e.g search in modarchive.com)
 * ALT + Double click on a song: Opens the song
 * "Add all to playlist" button adds all the results
-* "Rebuild db" rebuilds the modland database by parsing `allmods.zip` in http://modland.com/ - **you have to rebuild the db from time to time to get the updates and new songs uploaded to modland**
+* "Check for updates in modland..." rebuilds the modland database by parsing `allmods.zip` in http://modland.com/ - **you have to rebuild the db from time to time to get the updates and new songs uploaded to modland**
 
 ## Enable cache (optionally)
 
@@ -36,12 +36,12 @@ Cached files storage path: [https://www.un4seen.com/forum/?topic=20680.0](https:
 
 ## Formats imported
 
-With "Rebuild db" the xmplay supported formats are parsed: `"mod","s3m","xm","it","mo3","mtm","umx"`.
+With "Rebuild db (default)" the xmplay supported formats are parsed: `"mod","s3m","xm","it","mo3","mtm","umx"`.
 
 If you add the [xmp-openmpt](https://lib.openmpt.org/libopenmpt/download/) plugin, you can play many other formats including ancient ones: 
 `"mptm","mod","s3m","xm","it","669","amf","ams","c67","dbm","digi","dmf","dsm","dsym","dtm","far","fmt","imf","ice","j2b","m15","mdl","med","mms","mt2","mtm","nst","okt","plm","psm","pt36","ptm","sfx","sfx2","st26","stk","stm","stx","stp","symmod","ult","wow","gdm","mo3","oxm","umx","xpk","ppm","mmcmp"`.
 
-Use "Rebuild db (all formats)" to populate the database with all formats supported by both xmplay and xmp-openmpt.
+With "Rebuild db (all formats)" you populate the database with all formats supported by both xmplay and xmp-openmpt.
 
 ---
 

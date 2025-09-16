@@ -25,3 +25,13 @@ static time_t file_mtime_utc(const std::wstring& path)
     if (ull.QuadPart < EPOCH_DIFF) return 0;
     return (time_t)((ull.QuadPart - EPOCH_DIFF) / 10000000ULL);
 }
+
+static std::wstring ymd_local(time_t t)
+{
+    if (!t) return L"(none)";
+    std::tm lt{};
+    localtime_s(&lt, &t);
+    wchar_t buf[32];
+    swprintf_s(buf, L"%04d-%02d-%02d", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
+    return buf;
+}

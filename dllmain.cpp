@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <windows.h>
 #include <cwchar>      // for std::wcstoll
+#include <cwctype>
 #include <commctrl.h>
 #include "xmpfunc.h"
 #include "xmpdsp.h"
@@ -19,6 +20,8 @@
 #include <urlmon.h>
 #include "utf.hpp"
 #include "time.hpp"
+#include "http_head.hpp"
+#include <memory>
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "Shlwapi.lib")
 
@@ -77,6 +80,22 @@ static std::wstring DbBadge()
 static int g_colInitWidth[5] = { 0, 0, 0, 0, 0 };
 
 #define WM_DB_REBUILT    (WM_APP + 100)
+#define WM_CHECK_READY   (WM_APP + 101)
+
+struct CheckParams {
+    HWND hDlg;
+};
+
+static unsigned __stdcall CheckUpdatesThread(void* pv)
+{
+    std::unique_ptr<CheckParams> p((CheckParams*)pv);
+    time_t remoteUtc = 0;
+    BOOL ok = HttpHead_LastModified(L"https://modland.com/allmods.zip", &remoteUtc) ? TRUE : FALSE;
+
+    // Post result back.  Use LPARAM for the 64-bit time safely.
+    PostMessageW(p->hDlg, WM_CHECK_READY, (WPARAM)ok, (LPARAM)remoteUtc);
+    return 0;
+}
 
 #define IDT_SEARCH_DELAY      1
 #define SEARCH_DELAY_MS     300   // 300 ms de debounce
@@ -623,6 +642,47 @@ static bool EnsureDatabaseOpen(HWND hDlg)
     return false;
 }
 
+// -- Helpers para construir el MATCH ------------------------------
+
+static std::wstring trim_ws(const std::wstring& s) {
+    size_t i = 0, j = s.size();
+    while (i < j && iswspace(s[i])) ++i;
+    while (j > i && iswspace(s[j - 1])) --j;
+    return s.substr(i, j - i);
+}
+
+// Convierte puntuación en espacios y compone "t1* t2* ...".
+static std::string BuildMatchFromFreeText(const std::wstring& wquery) {
+    // 1) puntuación -> espacio (conserva letras/dígitos/_)
+    std::wstring norm; norm.reserve(wquery.size());
+    for (wchar_t ch : wquery) {
+        if (iswalnum(ch) || ch == L'_') norm.push_back(ch);
+        else norm.push_back(L' ');
+    }
+
+    // 2) split por espacios
+    std::vector<std::wstring> terms;
+    size_t i = 0, n = norm.size();
+    while (i < n) {
+        while (i < n && iswspace(norm[i])) ++i;
+        size_t j = i;
+        while (j < n && !iswspace(norm[j])) ++j;
+        if (j > i) terms.emplace_back(norm.substr(i, j - i));
+        i = j;
+    }
+
+    // 3) "term*" en UTF-8
+    std::string q;
+    for (auto& t : terms) {
+        std::string u8 = to_utf8(t);
+        if (u8.empty()) continue;
+        if (!q.empty()) q.push_back(' ');
+        q += u8;
+        if (u8.back() != '*') q.push_back('*');
+    }
+    return q; // puede quedar vacío si todo era puntuación
+}
+
 static void DoSearch(HWND hDlg, bool exact, int randomCount) {
     if (!EnsureDatabaseOpen(hDlg))
         return;    // if it failed, we already showed an error
@@ -738,17 +798,46 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
     }
     else {
         // 1) Leer búsqueda (UTF-16) y convertir a UTF-8 + wildcard
-        std::wstring wquery = get_window_textW(GetDlgItem(hDlg, IDC_EDIT_SEARCH));
-        std::string  query = to_utf8(wquery);
         // only append ‘*’ if
         //  1) the user didn’t request exact,
         //  2) they haven’t wrapped the query in quotes,
         //  3) and it doesn’t already end with ‘*’
-        if (!exact
-            && !(query.size() >= 2 && query.front() == '"' && query.back() == '"')
-            && !query.empty() && query.back() != '*')
-        {
-            query.push_back('*');
+        std::wstring wraw = get_window_textW(GetDlgItem(hDlg, IDC_EDIT_SEARCH));
+        std::wstring wq = trim_ws(wraw);
+
+        // ¿Usuario ha escrito comillas?
+        bool userQuoted = (wq.size() >= 2 && wq.front() == L'"' && wq.back() == L'"');
+
+        std::string matchParam;
+        if (exact || userQuoted) {
+            // Frase exacta: quita comillas exteriores si vienen, escapa " internos y envuelve.
+            std::wstring inner = userQuoted ? wq.substr(1, wq.size() - 2) : wq;
+
+            std::wstring escaped; escaped.reserve(inner.size());
+            for (wchar_t c : inner) {
+                if (c == L'"') {
+                    escaped.push_back(L'"'); escaped.push_back(L'"');
+                }
+                else {
+                    escaped.push_back(c);
+                }
+            }
+            std::string utf8 = to_utf8(escaped);
+            matchParam.reserve(utf8.size() + 2);
+            matchParam.push_back('"');
+            matchParam += utf8;
+            matchParam.push_back('"');
+        }
+        else {
+            // Libre: sanea y usa prefijos por término
+            matchParam = BuildMatchFromFreeText(wq);
+        }
+
+        // Si tras sanear quedó vacío, sal con un mensajito
+        if (matchParam.empty()) {
+            SetDlgItemTextW(hDlg, IDC_STATIC_COUNT, L"Type at least 3 letters");
+            if (stmt) sqlite3_finalize(stmt);
+            return;
         }
 
         // 2) Preparar la consulta FTS5 con ORDER BY artist, bm25
@@ -803,7 +892,7 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
 
 
         // 3) Binder parámetro
-        sqlite3_bind_text(stmt, 1, query.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 1, matchParam.c_str(), -1, SQLITE_TRANSIENT);
 
         if (std::string(format) != "any") {
             sqlite3_bind_text(stmt, 2, format, -1, SQLITE_TRANSIENT);
@@ -993,8 +1082,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
             { IDC_BUTTON_ADD_ALL,false,true, false, false},   // botón ADD se mueve en Y
             { IDC_BUTTON_REPLACE_ALL, false,  true,  false, false},   // botón REPLACE idem
             { IDC_STATIC_COUNT, false,  true,  false, false},  // contador se mueve X e Y
-            { IDC_BUTTON_REBUILD, true, true, false, false},   // botón ADD se mueve en Y
-            { IDC_BUTTON_REBUILD_ALL, true, true, false, false}   // botón ADD se mueve en Y
+            { IDC_BUTTON_CHECK_UPDATES, true, true, false, false}, // botón CHECK se mueve en Y
         };
 
         for (auto& d : a) {
@@ -1233,42 +1321,17 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
             return TRUE;
         }
 
-        case IDC_BUTTON_REBUILD:
+        case IDC_BUTTON_CHECK_UPDATES:
         {
-            // disable button
-            EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), FALSE);
-            EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD_ALL), FALSE);
-            // launch thread
-            auto* params = new RebuildParams{ hDlg, false };
-            uintptr_t th = _beginthreadex(
-                nullptr, 0, RebuildThread, params, 0, nullptr
-            );
-            if (th) CloseHandle((HANDLE)th);
-            else {
-                MessageBoxW(hDlg, L"Could not start rebuild", L"Error", MB_ICONERROR);
-                delete params;
-                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), TRUE);
-                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD_ALL), TRUE);
-            }
-            return TRUE;
-        }
+            EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_CHECK_UPDATES), FALSE);
 
-        case IDC_BUTTON_REBUILD_ALL:
-        {
-            // disable button
-            EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), FALSE);
-            EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD_ALL), FALSE);
-            // launch thread
-            auto* params = new RebuildParams{ hDlg, true };
-            uintptr_t th = _beginthreadex(
-                nullptr, 0, RebuildThread, params, 0, nullptr
-            );
+            auto* args = new CheckParams{ hDlg };
+            uintptr_t th = _beginthreadex(nullptr, 0, CheckUpdatesThread, args, 0, nullptr);
             if (th) CloseHandle((HANDLE)th);
             else {
-                MessageBoxW(hDlg, L"Could not start rebuild", L"Error", MB_ICONERROR);
-                delete params;
-                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), TRUE);
-                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD_ALL), TRUE);
+                delete args;
+                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_CHECK_UPDATES), TRUE);
+                MessageBoxW(hDlg, L"Could not start update check thread.", L"Error", MB_ICONERROR);
             }
             return TRUE;
         }
@@ -1285,15 +1348,71 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
     case WM_DB_REBUILT:
     {
         BOOL ok = (BOOL)wParam;
-        xmpfmisc->ShowBubble(
-            ok ? "DB rebuilt successfully!" : "DB rebuild failed.",
-            1000
+        xmpfmisc->ShowBubble(ok ? "DB rebuilt successfully!" : "DB rebuild failed.", 1000);
+        EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_CHECK_UPDATES), TRUE);
+        return TRUE;
+    }
+
+    case WM_CHECK_READY:
+    {
+        BOOL ok = (BOOL)wParam;
+        time_t remoteUtc = (time_t)lParam;
+
+        EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_CHECK_UPDATES), TRUE);
+
+        // Compose info text
+        std::wstring msg;
+        if (ok) {
+            msg = L"Remote allmods.zip: " + ymd_local(remoteUtc)
+                + L"\nCurrent DB:       " + ymd_local(g_dbBuiltUnix)
+                + ((g_dbBuiltAllFormats) ? L" (all formats)\n" : L" (default)\n");
+            if (g_dbBuiltUnix && remoteUtc <= g_dbBuiltUnix) {
+                msg += L"\nYour database looks up to date.\n";
+            }
+            else {
+                msg += L"\nA newer list appears to be available.\n";
+            }
+            msg += L"\nChoose what to rebuild:\n"
+                L"  Yes = Rebuild (default formats)\n"
+                L"  No  = Rebuild (all formats)\n"
+                L"  Cancel = Do nothing";
+        }
+        else {
+            msg = L"Could not contact modland.com to read Last-Modified.\n\n"
+                L"You can still rebuild:\n"
+                L"  Yes = Rebuild (default formats)\n"
+                L"  No  = Rebuild (all formats)\n"
+                L"  Cancel = Do nothing";
+        }
+
+        int ret = MessageBoxW(
+            hDlg, msg.c_str(), L"Check for updates",
+            MB_ICONINFORMATION | MB_YESNOCANCEL | MB_DEFBUTTON1
         );
-        EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), TRUE);
-        EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD_ALL), TRUE);
-        std::wstring t = L"cmod";
-        t += DbBadge();
-        SetWindowTextW(hDlg, t.c_str());
+
+        if (ret == IDYES || ret == IDNO) {
+            // Optional fast-exit: if we did get the server date and we're already up to date
+            // for the chosen 'kind', skip the rebuild.
+            bool wantAll = (ret == IDNO);
+            if (ok && g_dbBuiltUnix && (remoteUtc <= g_dbBuiltUnix) && (g_dbBuiltAllFormats == wantAll)) {
+                xmpfmisc->ShowBubble("Allmods is not newer — DB is up to date.", 1500);
+                // If you want to refresh UI counters/etc:
+                PostMessageW(hDlg, WM_DB_REBUILT, TRUE, 0);
+                return TRUE;
+            }
+
+            // Launch your existing rebuild thread with the chosen mode
+            EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_CHECK_UPDATES), FALSE);
+            auto* params = new RebuildParams{ hDlg, wantAll /*all*/ };
+            uintptr_t th = _beginthreadex(nullptr, 0, RebuildThread, params, 0, nullptr);
+            if (th) CloseHandle((HANDLE)th);
+            else {
+                delete params;
+                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_CHECK_UPDATES), TRUE);
+                MessageBoxW(hDlg, L"Could not start rebuild thread.", L"Error", MB_ICONERROR);
+            }
+        }
+
         return TRUE;
     }
 

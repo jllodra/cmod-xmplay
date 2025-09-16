@@ -161,6 +161,7 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="sqlite\sqlite3.h" />
+    <ClInclude Include="time.hpp" />
     <ClInclude Include="utf.hpp" />
   </ItemGroup>
   <ItemGroup>

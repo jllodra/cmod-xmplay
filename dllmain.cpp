@@ -18,6 +18,7 @@
 #include <vector>
 #include <urlmon.h>
 #include "utf.hpp"
+#include "time.hpp"
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "Shlwapi.lib")
 
@@ -48,6 +49,30 @@ static HWND hWndConf = 0;
 static HWND hWndXMP;
 
 static sqlite3* g_db = nullptr;
+// --- build info (caché en memoria) ---
+static time_t        g_dbBuiltUnix = 0;          // epoch (UTC)
+static std::wstring  g_dbBuiltIsoW;              // "YYYY-MM-DDTHH:MM:SSZ"
+static bool          g_dbBuiltAllFormats = false; // true si se reconstruyó con 'allFormats'
+static std::wstring DbBadge()
+{
+    if (!g_dbBuiltUnix) return L"";  // aún no sabemos la fecha
+
+    std::tm tmLocal{};
+#if defined(_WIN32)
+    localtime_s(&tmLocal, &g_dbBuiltUnix);   // thread-safe en MSVC
+#else
+    localtime_r(&g_dbBuiltUnix, &tmLocal);
+#endif
+
+    wchar_t date[16] = L"";
+    if (wcsftime(date, _countof(date), L"%Y-%m-%d", &tmLocal) == 0)
+        return L"";
+
+    std::wstring s = L"  -  db: ";
+    s += date;                              // ej. 2025-03-21 (hora local)
+    if (g_dbBuiltAllFormats) s += L" (all formats)";
+    return s;
+}
 
 static int g_colInitWidth[5] = { 0, 0, 0, 0, 0 };
 
@@ -172,6 +197,94 @@ inline std::wstring get_window_textW(HWND h) {
     return w;
 }
 
+// -- DB build info storage/retrieval
+
+// Guarda metadatos de build en la BBDD abierta 'db'
+static void StoreDbBuildInfo(sqlite3* db, bool allFormats)
+{
+    sqlite3_exec(db,
+        "CREATE TABLE IF NOT EXISTS meta("
+        "  k TEXT PRIMARY KEY,"
+        "  v TEXT NOT NULL"
+        ");", nullptr, nullptr, nullptr);
+
+    const time_t now = std::time(nullptr);
+    const std::string nowStr = std::to_string((long long)now);
+    const std::string isoStr = to_iso8601_utc(now);
+    const char* kind = allFormats ? "all" : "default";
+
+    sqlite3_stmt* st = nullptr;
+    const char* sql =
+        "INSERT OR REPLACE INTO meta(k,v) VALUES "
+        " ('built_unix', ?1),"
+        " ('built_iso',  ?2),"
+        " ('build_kind', ?3);";
+    if (sqlite3_prepare_v2(db, sql, -1, &st, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, nowStr.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 2, isoStr.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 3, kind, -1, SQLITE_TRANSIENT);
+        sqlite3_step(st);
+    }
+    sqlite3_finalize(st);
+
+    // refresca la caché en memoria
+    g_dbBuiltUnix = now;
+    g_dbBuiltIsoW = to_wide(isoStr);
+    g_dbBuiltAllFormats = allFormats;
+}
+
+// Carga metadatos de build desde 'db'; si no hay tabla meta, cae al mtime del fichero
+static void LoadDbBuildInfo(sqlite3* db, const std::wstring& dbPath)
+{
+    g_dbBuiltUnix = 0;
+    g_dbBuiltIsoW.clear();
+    g_dbBuiltAllFormats = false;
+
+    auto getMeta = [&](const char* key) -> std::string {
+        sqlite3_stmt* st = nullptr;
+        std::string val;
+        if (sqlite3_prepare_v2(db, "SELECT v FROM meta WHERE k=?1;", -1, &st, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, key, -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                const unsigned char* p = sqlite3_column_text(st, 0);
+                if (p) val.assign((const char*)p);
+            }
+        }
+        sqlite3_finalize(st);
+        return val;
+    };
+
+    // ¿existe tabla meta?
+    bool hasMeta = false;
+    {
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta';",
+            -1, &st, nullptr) == SQLITE_OK) {
+            hasMeta = (sqlite3_step(st) == SQLITE_ROW);
+        }
+        sqlite3_finalize(st);
+    }
+
+    if (hasMeta) {
+        std::string u = getMeta("built_unix");
+        std::string i = getMeta("built_iso");
+        std::string k = getMeta("build_kind");
+        if (!u.empty()) g_dbBuiltUnix = (time_t)_strtoi64(u.c_str(), nullptr, 10);
+        if (!i.empty()) g_dbBuiltIsoW = to_wide(i);
+        g_dbBuiltAllFormats = (_stricmp(k.c_str(), "all") == 0);
+    }
+    else {
+        // Fallback: mtime del archivo
+        time_t t = file_mtime_utc(dbPath);
+        if (t) {
+            g_dbBuiltUnix = t;
+            g_dbBuiltIsoW = to_wide(to_iso8601_utc(t));
+            g_dbBuiltAllFormats = false;
+        }
+    }
+}
+
 // -- DB rebuild
 
 static bool RebuildDatabase(XMPFILE txtFile,
@@ -271,6 +384,8 @@ static bool RebuildDatabase(XMPFILE txtFile,
         }
     }
 
+    StoreDbBuildInfo(db, /*allFormats=*/all);
+
     // Finish up
     sqlite3_finalize(ins);
     sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
@@ -334,6 +449,9 @@ static bool SwapInNewDatabase()
 
     // ::DeleteFileW(zip.c_str());
     // ::DeleteFileW(txt.c_str());
+
+    // Refresca caché de metadatos tras el swap
+    LoadDbBuildInfo(g_db, oldDb);
 
     return true;
 }
@@ -486,8 +604,10 @@ static bool EnsureDatabaseOpen(HWND hDlg)
         SQLITE_OPEN_READONLY,
         nullptr
     );
-    if (rc == SQLITE_OK)
+    if (rc == SQLITE_OK) {
+        LoadDbBuildInfo(g_db, dbPath);
         return true;
+    }
 
     // On error, pull the UTF-8 msg, convert, and show
     const char* errA = sqlite3_errmsg(g_db);
@@ -553,6 +673,7 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
         title += fmtName;
         title += L"]";
     }
+    title += DbBadge();
     SetWindowTextW(hDlg, title.c_str());
 
     HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
@@ -974,6 +1095,10 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
         if (hIconBig)
             SendMessageW(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
 
+        EnsureDatabaseOpen(hDlg); // si existe cmod.db, rellena g_dbBuilt* 
+        std::wstring t = L"cmod";
+        t += DbBadge();
+        SetWindowTextW(hDlg, t.c_str());
 
         return TRUE;
     }
@@ -1063,8 +1188,8 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
         case IDC_BUTTON_REPLACE_ALL:
         {
             // Enviar a XMPlay
-            xmpfmisc->DDE("key341");
-            xmpfmisc->DDE("key370");
+            xmpfmisc->DDE("key341"); // select all
+			xmpfmisc->DDE("key370"); // delete selection
             // sin break, ahora añadimos:
         }
         case IDC_BUTTON_ADD_ALL:
@@ -1166,6 +1291,9 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
         );
         EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD), TRUE);
         EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_REBUILD_ALL), TRUE);
+        std::wstring t = L"cmod";
+        t += DbBadge();
+        SetWindowTextW(hDlg, t.c_str());
         return TRUE;
     }
 

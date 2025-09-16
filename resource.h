@@ -1,6 +1,6 @@
-//{{NO_DEPENDENCIES}}
-// Archivo de inclusión generado de Microsoft Visual C++.
-// Usado por cmod-xmplay.rc
+ï»¿//{{NO_DEPENDENCIES}}
+// Microsoft Visual C++ generated include file.
+// Used by cmod-xmplay.rc
 //
 #define IDD_DIALOG1                     101
 #define IDR_POPUP_MENU                  103
@@ -11,6 +11,7 @@
 #define IDC_COMBO_FORMAT                1008
 #define IDC_COMBO1                      1009
 #define IDC_BUTTON_ADD_ALL              1009
+#define IDC_BUTTON_REPLACE_ALL          1010
 #define IDC_STATIC_COUNT                1011
 #define IDC_STATIC_SEARCHBY             1012
 #define IDC_STATIC_FORMAT               1013
@@ -23,7 +24,7 @@
 #define ID_CONTEXT_ADD                  40003
 #define ID_CONTEXT_SEARCH_ARTIST        40004
 #define ID_CONTEXT_COPY_URL             40005
-#define ID_CONTEXT_SEARCH_MODARCHIVE_FILE   40006
+#define ID_CONTEXT_SEARCH_MODARCHIVE_FILE 40006
 #define ID_CONTEXT_SEARCH_MODARCHIVE_ARTIST 40007
 
 // Next default values for new objects

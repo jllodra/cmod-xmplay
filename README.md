@@ -38,12 +38,12 @@ Cached files storage path: [https://www.un4seen.com/forum/?topic=20680.0](https:
 
 <img width="371" height="308" alt="image" src="https://github.com/user-attachments/assets/d1992034-dd18-4fc3-9f50-e98c11cdb00d" />
 
-With "Rebuild (default formats)" the xmplay supported formats are parsed: `"mod","s3m","xm","it","mo3","mtm","umx"`.
+With **Rebuild (default formats)** the xmplay supported formats are parsed: `"mod","s3m","xm","it","mo3","mtm","umx"`.
 
 If you add the [xmp-openmpt](https://lib.openmpt.org/libopenmpt/download/) plugin, you can play many other formats including ancient ones: 
 `"mptm","mod","s3m","xm","it","669","amf","ams","c67","dbm","digi","dmf","dsm","dsym","dtm","far","fmt","imf","ice","j2b","m15","mdl","med","mms","mt2","mtm","nst","okt","plm","psm","pt36","ptm","sfx","sfx2","st26","stk","stm","stx","stp","symmod","ult","wow","gdm","mo3","oxm","umx","xpk","ppm","mmcmp"`.
 
-With "Rebuild (all formats)" you populate the database with all formats supported by both xmplay and xmp-openmpt.
+With **Rebuild (all formats)** you populate the database with all formats supported by both xmplay and xmp-openmpt.
 
 ---
 

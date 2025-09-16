@@ -18,7 +18,7 @@ And press a key, I have it binded to the `W` key.
 
 ## Usage
 
-<img width="793" height="715" alt="image" src="https://github.com/user-attachments/assets/95a36ea1-16e2-4888-ad9a-27f12d7bd714" />
+<img width="767" height="585" alt="image" src="https://github.com/user-attachments/assets/fef66f02-67e4-4091-a1ee-11ecf95bf1ec" />
 
 * Double click on a song: Adds it to playlist
 * Right click on a song: Opens context dialog with options (e.g search in modarchive.com)
@@ -36,12 +36,14 @@ Cached files storage path: [https://www.un4seen.com/forum/?topic=20680.0](https:
 
 ## Formats imported
 
-With "Rebuild db (default)" the xmplay supported formats are parsed: `"mod","s3m","xm","it","mo3","mtm","umx"`.
+<img width="371" height="308" alt="image" src="https://github.com/user-attachments/assets/d1992034-dd18-4fc3-9f50-e98c11cdb00d" />
+
+With "Rebuild (default formats)" the xmplay supported formats are parsed: `"mod","s3m","xm","it","mo3","mtm","umx"`.
 
 If you add the [xmp-openmpt](https://lib.openmpt.org/libopenmpt/download/) plugin, you can play many other formats including ancient ones: 
 `"mptm","mod","s3m","xm","it","669","amf","ams","c67","dbm","digi","dmf","dsm","dsym","dtm","far","fmt","imf","ice","j2b","m15","mdl","med","mms","mt2","mtm","nst","okt","plm","psm","pt36","ptm","sfx","sfx2","st26","stk","stm","stx","stp","symmod","ult","wow","gdm","mo3","oxm","umx","xpk","ppm","mmcmp"`.
 
-With "Rebuild db (all formats)" you populate the database with all formats supported by both xmplay and xmp-openmpt.
+With "Rebuild (all formats)" you populate the database with all formats supported by both xmplay and xmp-openmpt.
 
 ---
 

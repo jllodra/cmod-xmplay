@@ -114,6 +114,14 @@ Cached files storage path info: [https://www.un4seen.com/forum/?topic=20680.0](h
 
 ---
 
+## 🎱
+
+**I consider this plug-in as "feature-complete". Bugfixes and maintenance operations will be done when necessary.**
+
+**If you find a bug or want a new feature, please open an issue.**
+
+---
+
 Enjoy, and spread the word 🎶
 
 by **herotyc**

@@ -50,7 +50,7 @@ No web browser. No manual downloads. Just search → play.
 
 ## 🧭 Usage
 
-<img width="745" height="597" alt="image" src="https://github.com/user-attachments/assets/1b1cd242-09a2-4bf1-82cb-e267db67cc6b" />
+<img width="758" height="612" alt="image" src="https://github.com/user-attachments/assets/e8930c33-4370-423b-b68f-9993e72d932e" />
 
 * **Type ≥ 3 characters** to search (Artist / Song / All).
 * **Double-click** a result → add to playlist.

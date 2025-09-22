@@ -22,6 +22,8 @@
 #include "time.hpp"
 #include "http_head.hpp"
 #include <memory>
+#include "modland.hpp"
+#include "pls.hpp"
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "Shlwapi.lib")
 
@@ -143,7 +145,38 @@ struct CtrlInfo {
 static RECT               g_rcInitClient;
 static std::map<int, CtrlInfo> g_mapCtrls;
 
-// -- Size, URL encode and helpers
+static bool g_use_pls = true;  // default if no config.ini is present
+
+// -- config, Size, URL encode and helpers
+
+static bool LoadConfigIni()
+{
+    // locate config.ini next to DLL
+    wchar_t dllDir[MAX_PATH]{};
+    if (!GetModuleFileNameW(hInstance, dllDir, MAX_PATH))
+        return false;
+    PathRemoveFileSpecW(dllDir);
+
+    wchar_t iniPath[MAX_PATH]{};
+    if (!PathCombineW(iniPath, dllDir, L"cmod.ini"))
+        return false;
+
+    // If it doesn't exist, keep defaults
+    const DWORD attr = GetFileAttributesW(iniPath);
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+        return false;
+
+    // Read use_pls under [cmod]
+    // (GetPrivateProfileIntW is simpler/safer than parsing a string)
+    const int use_pls = GetPrivateProfileIntW(L"cmod", L"use_pls", /*default*/1, iniPath);
+    g_use_pls = (use_pls != 0);
+    return true;
+}
+
+static void ClearSelectionNow() {
+    xmpfmisc->DDE("key341");
+    xmpfmisc->DDE("key342");
+}
 
 static std::wstring HumanSize(sqlite3_int64 bytes)
 {
@@ -158,53 +191,6 @@ static std::wstring HumanSize(sqlite3_int64 bytes)
     // swprintf_s is the MSVC‐safe version of swprintf
     swprintf_s(buf, _countof(buf), L"%.1f %s", size, units[unit]);
     return buf;
-}
-
-std::string url_encode_utf8(const std::string& input) {
-    // 0) First convert all '#' → "%23"
-    std::string pre;
-    pre.reserve(input.size());
-    for (unsigned char c : input) {
-        if (c == '#') pre += "%23";
-        else          pre += c;
-    }
-
-    // 1) Ask UrlEscapeA how big the buffer must be (including NUL)
-    DWORD needed = 0;
-    UrlEscapeA(
-        pre.c_str(),
-        nullptr,
-        &needed,
-        URL_ESCAPE_PERCENT
-    );
-    if (needed == 0)
-        return pre;  // nothing to escape (or error)
-
-    // 2) Do the real escape
-    std::string out;
-    out.resize(needed);
-    if (SUCCEEDED(UrlEscapeA(
-        pre.c_str(),
-        &out[0],
-        &needed,
-        URL_ESCAPE_PERCENT)))
-    {
-        // trim trailing NUL
-        out.resize(needed - 1);
-        return out;
-    }
-
-    // fallback
-    return pre;
-}
-
-inline std::string modland_url_from_pathU8(const std::string& pathUtf8) {
-    return "https://modland.com/pub/modules/" + url_encode_utf8(pathUtf8);
-}
-
-inline std::string modland_url_from_pathW(const std::wstring& pathW) {
-    std::string u8 = to_utf8(pathW);
-    return modland_url_from_pathU8(u8);
 }
 
 inline std::wstring get_window_textW(HWND h) {
@@ -636,7 +622,7 @@ static bool EnsureDatabaseOpen(HWND hDlg)
     
     std::wstring msg = L"Error opening database:\n" + dbPath +
         L"\n\nSQLite error:\n" + errW + 
-        L"\n\nClick Rebuild DB, wait a moment, and try again.";
+        L"\n\nClick 'Check for updates' and rebuild the db, wait a moment, and try again.";
     MessageBoxW(hDlg, msg.c_str(), L"SQLite Error", MB_OK | MB_ICONERROR);
 
     return false;
@@ -1275,28 +1261,54 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
 
         case IDC_BUTTON_REPLACE_ALL:
         {
-            // Enviar a XMPlay
-            xmpfmisc->DDE("key341"); // select all
-			xmpfmisc->DDE("key370"); // delete selection
-            // sin break, ahora añadimos:
+            if (g_use_pls) {
+                HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
+                std::vector<PlsEntry> items;
+                CollectPlsEntriesFromList(hList, /*onlySelected=*/false, items);
+
+                std::wstring plsPathW; std::string plsUrl;
+                if (!items.empty() && WriteTempPls(items, &plsPathW, &plsUrl)) {
+                    std::string dde = "[open(" + plsUrl + ")]";
+                    xmpfmisc->DDE(dde.c_str());
+                    ClearSelectionNow();
+                }
+                return TRUE;
+            }
+            else {
+                // current behavior
+                xmpfmisc->DDE("key341"); // select all
+                xmpfmisc->DDE("key370"); // delete selection
+                // fallthrough into ADD_ALL (or duplicate the ADD_ALL logic here)
+            }
         }
         case IDC_BUTTON_ADD_ALL:
         {
-            HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
-            int itemCount = ListView_GetItemCount(hList);
-            for (int i = 0; i < itemCount; ++i) {
-                // 1) Obtener full_path (columna 4) en UTF-16
-                WCHAR wpath[MAX_PATH];
-                ListView_GetItemText(hList, i, 4, wpath, MAX_PATH);
-                wpath[_countof(wpath) - 1] = L'\0';  // por si acaso
+            if (g_use_pls) {
+                HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
+                std::vector<PlsEntry> items;
+                CollectPlsEntriesFromList(hList, /*onlySelected=*/false, items);
 
-                std::string url = modland_url_from_pathW(wpath);
-                std::string ddeCmd = "[list(" + url + ")]";
-
-                // 4) Enviar a XMPlay
-                xmpfmisc->DDE(ddeCmd.c_str());
+                std::wstring plsPathW; std::string plsUrl;
+                if (!items.empty() && WriteTempPls(items, &plsPathW, &plsUrl)) {
+                    std::string dde = "[list(" + plsUrl + ")]";
+                    xmpfmisc->DDE(dde.c_str());
+                    ClearSelectionNow();
+                }
+                return TRUE;
             }
-            return TRUE;
+            else {
+                // your existing per-item [list(url)] loop:
+                HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
+                int itemCount = ListView_GetItemCount(hList);
+                for (int i = 0; i < itemCount; ++i) {
+                    WCHAR wpath[MAX_PATH];
+                    ListView_GetItemText(hList, i, 4, wpath, MAX_PATH);
+                    std::string url = modland_url_from_pathW(wpath);
+                    std::string ddeCmd = "[list(" + url + ")]";
+                    xmpfmisc->DDE(ddeCmd.c_str());
+                }
+                return TRUE;
+            }
         }
 
         case IDC_BUTTON_ARTIST:
@@ -1507,20 +1519,31 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                 HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
                 int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
                 if (sel != -1) {
-                    WCHAR wbuf[MAX_PATH];
-                    ListView_GetItemText(hList, sel, 4, wbuf, MAX_PATH);
-                    wbuf[_countof(wbuf) - 1] = L'\0';
+                    const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+                    if (g_use_pls) {
+                        // 1-entry PLS
+                        std::vector<PlsEntry> items;
+                        // ensure “selected only” collection picks that row
+                        ListView_SetItemState(hList, sel, LVIS_SELECTED, LVIS_SELECTED);
+                        CollectPlsEntriesFromList(hList, /*onlySelected=*/true, items);
 
-                    const std::string url = modland_url_from_pathW(wbuf);
-
-                    std::string ddeCmd;
-                    if (GetKeyState(VK_MENU) & 0x8000) {
-                        ddeCmd = "[open(" + url + ")]";
+                        std::wstring plsPathW; std::string plsUrl;
+                        if (!items.empty() && WriteTempPls(items, &plsPathW, &plsUrl)) {
+                            std::string dde = alt ? "[open(" + plsUrl + ")]"
+                                : "[list(" + plsUrl + ")]";
+                            xmpfmisc->DDE(dde.c_str());
+                            ClearSelectionNow();
+                        }
                     }
                     else {
-                        ddeCmd = "[list(" + url + ")]";
+                        // current behavior
+                        WCHAR wbuf[MAX_PATH];
+                        ListView_GetItemText(hList, sel, 4, wbuf, MAX_PATH);
+                        const std::string url = modland_url_from_pathW(wbuf);
+                        std::string ddeCmd = alt ? "[open(" + url + ")]"
+                            : "[list(" + url + ")]";
+                        xmpfmisc->DDE(ddeCmd.c_str());
                     }
-                    xmpfmisc->DDE(ddeCmd.c_str());
                 }
                 return TRUE;
             }
@@ -1596,24 +1619,41 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                 // HWND hList = GetDlgItem(hDlg, IDC_LIST_RESULTS);
                 // Para “Open” solo si hay uno seleccionado
                 if (cmd == ID_CONTEXT_OPEN) {
-                    int idx = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
-                    if (idx != -1) {
-                        WCHAR wpath[MAX_PATH];
-                        ListView_GetItemText(hList, idx, 4, wpath, MAX_PATH);
-                        const std::string url = modland_url_from_pathW(wpath);
-                        std::string ddeCmd = "[open(" + url + ")]";
-                        xmpfmisc->DDE(ddeCmd.c_str());
+                    if (g_use_pls) {
+                        std::vector<PlsEntry> items;
+                        CollectPlsEntriesFromList(hList, /*onlySelected=*/true, items);
+                        std::wstring plsPathW; std::string plsUrl;
+                        if (!items.empty() && WriteTempPls(items, &plsPathW, &plsUrl)) {
+                            xmpfmisc->DDE(("[open(" + plsUrl + ")]").c_str());
+							ClearSelectionNow();
+                        }
+                    }
+                    else {
+                        int idx = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
+                        if (idx != -1) {
+                            WCHAR wpath[MAX_PATH]; ListView_GetItemText(hList, idx, 4, wpath, MAX_PATH);
+                            const std::string url = modland_url_from_pathW(wpath);
+                            xmpfmisc->DDE(("[open(" + url + ")]").c_str());
+                        }
                     }
                 }
-                // Para “Add to playlist” iteramos todos los seleccionados
                 else if (cmd == ID_CONTEXT_ADD) {
-                    int idx = -1;
-                    while ((idx = ListView_GetNextItem(hList, idx, LVNI_SELECTED)) != -1) {
-                        WCHAR wpath[MAX_PATH];
-                        ListView_GetItemText(hList, idx, 4, wpath, MAX_PATH);
-                        const std::string url = modland_url_from_pathW(wpath);
-                        std::string ddeCmd = "[list(" + url + ")]";
-                        xmpfmisc->DDE(ddeCmd.c_str());
+                    if (g_use_pls) {
+                        std::vector<PlsEntry> items;
+                        CollectPlsEntriesFromList(hList, /*onlySelected=*/true, items);
+                        std::wstring plsPathW; std::string plsUrl;
+                        if (!items.empty() && WriteTempPls(items, &plsPathW, &plsUrl)) {
+                            xmpfmisc->DDE(("[list(" + plsUrl + ")]").c_str());
+							ClearSelectionNow();
+                        }
+                    }
+                    else {
+                        int idx = -1;
+                        while ((idx = ListView_GetNextItem(hList, idx, LVNI_SELECTED)) != -1) {
+                            WCHAR wpath[MAX_PATH]; ListView_GetItemText(hList, idx, 4, wpath, MAX_PATH);
+                            const std::string url = modland_url_from_pathW(wpath);
+                            xmpfmisc->DDE(("[list(" + url + ")]").c_str());
+                        }
                     }
                 }
                 else if (cmd == ID_CONTEXT_SEARCH_ARTIST) {
@@ -1780,6 +1820,8 @@ XMPDSP *WINAPI XMPDSP_GetInterface2(DWORD face, InterfaceProc faceproc) {
         OpenSearchShortcut
     };
     xmpfmisc->RegisterShortcut(&shortcut);
+    
+    LoadConfigIni();
 
     std::srand((unsigned)std::time(nullptr));
 

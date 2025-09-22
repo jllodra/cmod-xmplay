@@ -159,7 +159,9 @@
   <ItemGroup>
     <ClInclude Include="framework.h" />
     <ClInclude Include="http_head.hpp" />
+    <ClInclude Include="modland.hpp" />
     <ClInclude Include="pch.h" />
+    <ClInclude Include="pls.hpp" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="sqlite\sqlite3.h" />
     <ClInclude Include="time.hpp" />

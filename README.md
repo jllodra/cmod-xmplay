@@ -96,7 +96,7 @@ use_pls=1
 By default, XMPlay can **replace** playlist titles once it reads file/module metadata (local files are pre-read; internet files only when played). To keep the PLS titles intact:
 
 1. Open **Options → Titles** in XMPlay.
-2. Set **Track title formatting** to **empty** (blank).
+2. Set **Track title formatting** to **empty** (blank) and click apply.
    *This prevents XMPlay from replacing the playlist’s PLS titles after tags are read.*
 3. In **Options → Display → Columns** (right click on the playlist), set the **Track** column to **Title** (not “Full path”).
 

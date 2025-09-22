@@ -13,6 +13,7 @@ No web browser. No manual downloads. Just search → play.
 * **Batch add** all visible results
 * **Update checker** that compares your local DB with Modland and rebuilds when new files appear
 * Optional **OpenMPT support** for a much wider set of classic/ancient formats
+* **Preformatted titles** via an on-the-fly playlist (PLS) so the playlist shows `Artist – Song`
 * Lightweight: one DLL + one SQLite DB
 
 ---
@@ -76,6 +77,40 @@ No web browser. No manual downloads. Just search → play.
 Choose **Check for updates → Rebuild (all formats)** to populate your DB with the extended list.
 
 ---
+
+## ⚙️ Configuration (optional)
+
+Create a `cmod.ini` **next to the plugin DLL**, do this only if you do not want to use a PLS file for some reason:
+
+```ini
+[cmod]
+; Use on-the-fly PLS to control playlist titles.
+; 1 = use PLS (recommended and default), 0 = add URLs directly (legacy behavior)
+use_pls=1
+```
+
+## 🎨 Making the titles look better (optional)
+
+### Stop XMPlay from overwriting titles after reading tags
+
+By default, XMPlay can **replace** playlist titles once it reads file/module metadata (local files are pre-read; internet files only when played). To keep the PLS titles intact:
+
+1. Open **Options → Titles** in XMPlay.
+2. Set **Track title formatting** to **empty** (blank).
+   *This prevents XMPlay from replacing the playlist’s PLS titles after tags are read.*
+3. In **Options → Display → Columns** (right click on the playlist), set the **Track** column to **Title** (not “Full path”).
+
+<img width="517" height="383" alt="image" src="https://github.com/user-attachments/assets/d1e68c7d-4f6b-4c26-966d-ad8c9619c59d" />
+
+<img width="596" height="392" alt="image" src="https://github.com/user-attachments/assets/1180a206-9a20-43c3-a6ed-afad3c18ece9" />
+
+<img width="517" height="379" alt="image" src="https://github.com/user-attachments/assets/53df3f8f-8868-4789-a048-b9fac7d295ad" />
+
+> **Library note:** The library doesn’t use formatted playlist titles, so disabling title updates here won’t affect your library contents.
+
+### If you still see some “module name” replacing your titles
+
+That can happen if XMPlay had cached metadata from earlier plays. Exporting the library, then deleting the `xmplay.library` file and reimporting the library refreshed things in testing.
 
 ## ⚡ Enable caching (optional)
 

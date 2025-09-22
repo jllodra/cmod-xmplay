@@ -157,6 +157,10 @@ Cached files storage path info: [https://www.un4seen.com/forum/?topic=20680.0](h
 
 **If you find a bug or want a new feature, please open an issue.**
 
+I recommend you to try some of the xmplay themes also, the ones from Keltic Danor are pretty nice:
+
+<img width="668" height="1138" alt="image" src="https://github.com/user-attachments/assets/ad1ad197-c2b8-4a60-b324-07953253993b" />
+
 ---
 
 Enjoy, and spread the word 🎶

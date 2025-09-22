@@ -112,7 +112,7 @@ By default, XMPlay can **replace** playlist titles once it reads file/module met
 
 ### If you still see some “module name” replacing your titles
 
-That can happen if XMPlay had cached metadata from earlier plays. Exporting the library, then deleting the `xmplay.library` file and reimporting the library refreshed things in testing.
+That can happen if XMPlay had cached metadata from earlier plays. Exporting the library, then deleting the `xmplay.library` file and reimporting the library refreshed things in testing. If you are not using a library at all, just delete `xmplay.library`.
 
 ## ⚡ Enable caching (optional)
 

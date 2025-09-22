@@ -80,7 +80,9 @@ Choose **Check for updates → Rebuild (all formats)** to populate your DB with 
 
 ## ⚙️ Configuration (optional)
 
-Create a `cmod.ini` **next to the plugin DLL**, do this only if you do not want to use a PLS file for some reason:
+Do this **only if you do not want to use a PLS file** for some reason.
+
+Create a `cmod.ini` **next to the plugin DLL**:
 
 ```ini
 [cmod]
@@ -89,7 +91,7 @@ Create a `cmod.ini` **next to the plugin DLL**, do this only if you do not want 
 use_pls=1
 ```
 
-## 🎨 Making the titles look better (optional)
+## 🎨 Making the titles look better (recommended)
 
 ### Stop XMPlay from overwriting titles after reading tags
 

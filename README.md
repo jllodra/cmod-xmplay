@@ -114,6 +114,8 @@ By default, XMPlay can **replace** playlist titles once it reads file/module met
 
 That can happen if XMPlay had cached metadata from earlier plays. Exporting the library, then deleting the `xmplay.library` file and reimporting the library refreshed things in testing. If you are not using a library at all, just delete `xmplay.library`.
 
+More info here if you create your own library of modland songs in xmplay. You can post-process it to make it look better: https://github.com/jllodra/cmod-xmplay/issues/9
+
 ## ⚡ Enable caching (optional)
 
 If you don’t want to re-download a song each time you play it:

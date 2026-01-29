@@ -1,45 +1,28 @@
 ﻿#pragma once
 #include <string>
-#include <Shlwapi.h>
 #include "utf.hpp"
-#pragma comment(lib, "Shlwapi.lib")
+
+inline bool is_unreserved_or_slash(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') ||
+           (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') ||
+           c == '-' || c == '_' || c == '.' || c == '~' || c == '/';
+}
 
 std::string url_encode_utf8(const std::string& input) {
-    // 0) First convert all '#' → "%23"
-    std::string pre;
-    pre.reserve(input.size());
-    for (unsigned char c : input) {
-        if (c == '#') pre += "%23";
-        else          pre += c;
-    }
-
-    // 1) Ask UrlEscapeA how big the buffer must be (including NUL)
-    DWORD needed = 0;
-    UrlEscapeA(
-        pre.c_str(),
-        nullptr,
-        &needed,
-        URL_ESCAPE_PERCENT
-    );
-    if (needed == 0)
-        return pre;  // nothing to escape (or error)
-
-    // 2) Do the real escape
     std::string out;
-    out.resize(needed);
-    if (SUCCEEDED(UrlEscapeA(
-        pre.c_str(),
-        &out[0],
-        &needed,
-        URL_ESCAPE_PERCENT)))
-    {
-        // trim trailing NUL
-        out.resize(needed - 1);
-        return out;
+    out.reserve(input.size() + 16);
+    for (unsigned char c : input) {
+        if (is_unreserved_or_slash(c)) {
+            out.push_back((char)c);
+        }
+        else {
+            char buf[4];
+            _snprintf_s(buf, _TRUNCATE, "%%%02X", c);
+            out.append(buf);
+        }
     }
-
-    // fallback
-    return pre;
+    return out;
 }
 
 inline std::string modland_url_from_pathU8(const std::string& pathUtf8) {

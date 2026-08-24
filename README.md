@@ -72,20 +72,21 @@ No web browser. No manual downloads. Just search → play.
 
 * **Default (XMPlay only):** `mod, s3m, xm, it, mo3, mtm, umx`
 * **All formats (with xmp-openmpt installed):**
-  `mptm, mod, s3m, xm, it, 669, amf, ams, c67, dbm, digi, dmf, dsm, dsym, dtm, far, fmt, imf, ice, j2b, m15, mdl, med, mms, mt2, mtm, nst, okt, plm, psm, pt36, ptm, sfx, sfx2, st26, stk, stm, stx, stp, symmod, ult, wow, gdm, mo3, oxm, umx, xpk, ppm, mmcmp`
+  `mptm, mod, s3m, xm, it, 669, amf, ams, c67, dbm, digi, dmf, dsm, dsym, dtm, far, fmt, imf, ice, j2b, m15, mdl, med, mms, mt2, mtm, nst, okt, plm, psm, pt36, ptm, sfx, sfx2, st26, stk, stm, stx, stp, symmod, ult, wow, gdm, mo3, oxm, umx, xpk, ppm, mmcmp, mmd0, mmd1, mmd2, mmd3, mmdc`
+* **ADT2Plug formats:** `a2m, a2t, amd, cff, dfm, fmk, hsc, mtk, rad, sa2, sat, xms` — add `in_adt2.dll` to XMPlay ([ADT2Plug v2.4.24](https://support.xmplay.com/files_view.php?file_id=727)).
 
 Choose **Check for updates → Rebuild (all formats)** to populate your DB with the extended list.
+The **Format** box is editable; type one or several extensions such as `it,xm` (commas, semicolons, and spaces are accepted).
 
 ---
 
 ## ⚙️ Configuration (optional)
 
-Do this **only if you do not want to use a PLS file** for some reason.
-
-Create a `cmod.ini` **next to the plugin DLL**:
+On startup, cmod creates `cmod.ini` **next to the plugin DLL** and adds its known formats. You can append more extensions to `formats`; if the value cannot be read or is empty, cmod uses its built-in list.
 
 ```ini
 [cmod]
+formats=669,a2m,a2t,amd,amf,ams,c67,cff,dbm,dfm,digi,dmf,dsm,dsym,dtm,far,fmk,fmt,gdm,hsc,ice,imf,it,j2b,m15,mdl,med,mmcmp,mmd0,mmd1,mmd2,mmd3,mmdc,mms,mo3,mod,mptm,mt2,mtk,mtm,nst,okt,oxm,plm,ppm,psm,pt36,ptm,rad,sa2,sat,s3m,sfx,sfx2,st26,stk,stm,stp,stx,symmod,ult,umx,wow,xm,xms,xpk
 ; Use on-the-fly PLS to control playlist titles.
 ; 1 = use PLS (recommended and default), 0 = add URLs directly (legacy behavior)
 use_pls=1

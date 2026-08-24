@@ -107,10 +107,18 @@ static const std::set<std::string> xmplayFormats = {
     "mod","s3m","xm","it","mo3","mtm","umx"
 };
 
-// all formats (xmplay + openmpt supported)
-static const std::set<std::string> allFormats = {
-    "mptm","mod","s3m","xm","it","669","amf","ams","c67","dbm","digi","dmf","dsm","dsym","dtm","far","fmt","imf","ice","j2b","m15","mdl","med","mms","mt2","mtm","nst","okt","plm","psm","pt36","ptm","sfx","sfx2","st26","stk","stm","stx","stp","symmod","ult","wow","gdm","mo3","oxm","umx","xpk","ppm","mmcmp", "mmd0", "mmd1", "mmd2", "mmd3", "mmdc"
+// All known formats (XMPlay + optional input plug-ins). This remains the
+// fallback if cmod.ini cannot be read or does not contain a usable list.
+static const std::set<std::string> allFormatsFallback = {
+    "mptm","mod","s3m","xm","it","669","a2m","a2t","amd","amf","ams",
+    "c67","cff","dbm","dfm","digi","dmf","dsm","dsym","dtm","far","fmk",
+    "fmt","hsc","imf","ice","j2b","m15","mdl","med","mms","mt2","mtk",
+    "mtm","nst","okt","plm","psm","pt36","ptm","rad","sa2","sat","sfx",
+    "sfx2","st26","stk","stm","stx","stp","symmod","ult","wow","gdm","mo3",
+    "oxm","umx","xms","xpk","ppm","mmcmp","mmd0","mmd1","mmd2","mmd3","mmdc"
 };
+
+static std::set<std::string> g_allFormats = allFormatsFallback;
 
 struct RebuildParams {
     HWND    hDlg;
@@ -149,6 +157,57 @@ static bool g_use_pls = true;  // default if no config.ini is present
 
 // -- config, Size, URL encode and helpers
 
+static std::wstring FormatsToIniValue(const std::set<std::string>& formats)
+{
+    std::wstring value;
+    for (const auto& format : formats) {
+        if (!value.empty()) value += L",";
+        value += to_wide(format);
+    }
+    return value;
+}
+
+static bool ParseFormatsIni(const wchar_t* value, std::set<std::string>& formats)
+{
+    formats.clear();
+    std::wstring token;
+
+    auto addToken = [&]() {
+        if (token.rfind(L"*.", 0) == 0)
+            token.erase(0, 2);
+        else if (!token.empty() && token.front() == L'.')
+            token.erase(0, 1);
+
+        bool valid = !token.empty();
+        for (wchar_t ch : token) {
+            if (ch > 127 || (!std::iswalnum(ch) && ch != L'_' && ch != L'-')) {
+                valid = false;
+                break;
+            }
+        }
+
+        if (valid) {
+            std::string format = to_utf8(token);
+            for (auto& ch : format)
+                ch = (char)std::tolower((unsigned char)ch);
+            formats.insert(format);
+        }
+        token.clear();
+    };
+
+    for (const wchar_t* p = value; ; ++p) {
+        const wchar_t ch = *p;
+        if (ch == L',' || ch == L';' || std::iswspace(ch) || ch == L'\0')
+            addToken();
+        else
+            token += ch;
+
+        if (ch == L'\0') break;
+    }
+
+    return !formats.empty();
+}
+
 static bool LoadConfigIni()
 {
     // locate config.ini next to DLL
@@ -161,15 +220,30 @@ static bool LoadConfigIni()
     if (!PathCombineW(iniPath, dllDir, L"cmod.ini"))
         return false;
 
-    // If it doesn't exist, keep defaults
-    const DWORD attr = GetFileAttributesW(iniPath);
-    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
-        return false;
-
     // Read use_pls under [cmod]
     // (GetPrivateProfileIntW is simpler/safer than parsing a string)
     const int use_pls = GetPrivateProfileIntW(L"cmod", L"use_pls", /*default*/1, iniPath);
     g_use_pls = (use_pls != 0);
+
+    // Keep a compiled-in fallback, then replace it only with a complete,
+    // non-empty INI value. GetPrivateProfileString reports truncation as
+    // buffer_size - 1 when reading a single key.
+    g_allFormats = allFormatsFallback;
+    std::vector<wchar_t> formatsBuffer(32768, L'\0');
+    const DWORD chars = GetPrivateProfileStringW(
+        L"cmod", L"formats", L"", formatsBuffer.data(),
+        static_cast<DWORD>(formatsBuffer.size()), iniPath);
+
+    if (chars == 0) {
+        const std::wstring defaults = FormatsToIniValue(allFormatsFallback);
+        WritePrivateProfileStringW(L"cmod", L"formats", defaults.c_str(), iniPath);
+    }
+    else if (chars < formatsBuffer.size() - 1) {
+        std::set<std::string> configuredFormats;
+        if (ParseFormatsIni(formatsBuffer.data(), configuredFormats))
+            g_allFormats = configuredFormats;
+    }
+
     return true;
 }
 
@@ -331,7 +405,7 @@ static bool RebuildDatabase(XMPFILE txtFile,
     }
 
     // TODO allowed or allowedAncient
-    const std::set<std::string> allowed = all ? allFormats : xmplayFormats;
+    const std::set<std::string>& allowed = all ? g_allFormats : xmplayFormats;
 
     const size_t CHUNK = 16 * 1024;
     std::vector<char> chunkBuf(CHUNK);
@@ -637,6 +711,49 @@ static std::wstring trim_ws(const std::wstring& s) {
     return s.substr(i, j - i);
 }
 
+static std::set<std::string> ReadFormatFilter(HWND hDlg, std::wstring& displayName)
+{
+    const std::wstring raw = trim_ws(
+        get_window_textW(GetDlgItem(hDlg, IDC_COMBO_FORMAT)));
+
+    std::set<std::string> formats;
+    ParseFormatsIni(raw.c_str(), formats);
+
+    // Empty input, "Any", "All", or a bare * all mean no format filter.
+    if (formats.empty() || formats.count("any") || formats.count("all")) {
+        formats.clear();
+        displayName = L"Any";
+        return formats;
+    }
+
+    displayName.clear();
+    for (const auto& format : formats) {
+        if (!displayName.empty()) displayName += L",";
+        std::wstring upper = to_wide(format);
+        for (auto& ch : upper) ch = std::towupper(ch);
+        displayName += upper;
+    }
+    return formats;
+}
+
+static std::string SqlPlaceholders(size_t count, int firstIndex)
+{
+    std::string result;
+    for (size_t i = 0; i < count; ++i) {
+        if (!result.empty()) result += ",";
+        result += "?" + std::to_string(firstIndex + static_cast<int>(i));
+    }
+    return result;
+}
+
+static void BindFormats(sqlite3_stmt* stmt,
+    const std::set<std::string>& formats, int firstIndex)
+{
+    int index = firstIndex;
+    for (const auto& format : formats)
+        sqlite3_bind_text(stmt, index++, format.c_str(), -1, SQLITE_TRANSIENT);
+}
+
 // Convierte puntuación en espacios y compone "t1* t2* ...".
 static std::string BuildMatchFromFreeText(const std::wstring& wquery) {
     // 1) puntuación -> espacio (conserva letras/dígitos/_)
@@ -676,20 +793,15 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
     // 0) Actualizar title bar
     std::wstring title = L"cmod";
 
-    // obtener 'format' del combo
-    static const wchar_t* formatNames[] = { L"Any", L"IT", L"XM", L"S3M", L"MOD" };
-    int fmtIdx = (int)SendMessageW(
-        GetDlgItem(hDlg, IDC_COMBO_FORMAT),
-        CB_GETCURSEL, 0, 0
-    );
-    const wchar_t* fmtName = (fmtIdx >= 0 && fmtIdx < 5)
-        ? formatNames[fmtIdx]
-        : L"Any";
+    // Read the ComboBox text so typed single- or multi-format filters work too.
+    std::wstring formatName;
+    const std::set<std::string> formats = ReadFormatFilter(hDlg, formatName);
+    const bool hasFormatFilter = !formats.empty();
     if (randomCount > 0) {
         title = title
             + std::wstring(L" – random ") + std::to_wstring(randomCount) + L" songs";
         title += L" [";
-        title += fmtName;
+        title += formatName;
         title += L"]";
     }
     else {
@@ -716,7 +828,7 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
         title += L" [";
         title += byName;
         title += L", ";
-        title += fmtName;
+        title += formatName;
         title += L"]";
     }
     title += DbBadge();
@@ -736,30 +848,17 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
     default: column = "modland"; // All: toda la tabla FTS5
     }
 
-    HWND hComboFormat = GetDlgItem(hDlg, IDC_COMBO_FORMAT);
-    sel = (int)SendMessageW(hComboFormat, CB_GETCURSEL, 0, 0);
-    const char* format;
-    switch (sel) {
-    case 0:  format = "any"; break;
-    case 1:  format = "it"; break;
-    case 2:  format = "xm";   break;
-    case 3:  format = "s3m"; break;
-    case 4:  format = "mod";   break;
-    default: format = "any"; // All: toda la tabla FTS5
-    }
-
     sqlite3_stmt* stmt = nullptr;
     if (randomCount > 0) {
         // ---- RANDOM SONGS PATH ----
-        bool hasFilter = (std::string(format) != "any");
-
         // Build the SQL
         std::string sql =
             "SELECT UPPER(extension), artist, song, size, full_path "
             "FROM modland";
-        if (hasFilter) {
-            sql += " WHERE extension = ?1";
-            sql += " ORDER BY random() LIMIT ?2;";
+        if (hasFormatFilter) {
+            sql += " WHERE extension IN (" + SqlPlaceholders(formats.size(), 1) + ")";
+            sql += " ORDER BY random() LIMIT ?" +
+                std::to_string(static_cast<int>(formats.size()) + 1) + ";";
         }
         else {
             sql += " ORDER BY random() LIMIT ?1;";
@@ -771,11 +870,9 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
             MessageBoxW(NULL, wmsg.c_str(), wtitle.c_str(), MB_OK | MB_ICONERROR);
             return;
         }
-        if (hasFilter) {
-            // 1st param = format string
-            sqlite3_bind_text(stmt, 1, format, -1, SQLITE_TRANSIENT);
-            // 2nd param = count limit
-            sqlite3_bind_int(stmt, 2, randomCount);
+        if (hasFormatFilter) {
+            BindFormats(stmt, formats, 1);
+            sqlite3_bind_int(stmt, static_cast<int>(formats.size()) + 1, randomCount);
         }
         else {
             // Only one param: limit
@@ -848,8 +945,8 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
             "FROM modland "
             "WHERE " + std::string(column) + " MATCH ?1 ";
 
-        if (std::string(format) != "any") {
-            sql += "AND extension = ?2 ";
+        if (hasFormatFilter) {
+            sql += "AND extension IN (" + SqlPlaceholders(formats.size(), 2) + ") ";
         }
 
         sql +=
@@ -880,9 +977,8 @@ static void DoSearch(HWND hDlg, bool exact, int randomCount) {
         // 3) Binder parámetro
         sqlite3_bind_text(stmt, 1, matchParam.c_str(), -1, SQLITE_TRANSIENT);
 
-        if (std::string(format) != "any") {
-            sqlite3_bind_text(stmt, 2, format, -1, SQLITE_TRANSIENT);
-        }
+        if (hasFormatFilter)
+            BindFormats(stmt, formats, 2);
     }
 
     // 4) Recorrer resultados e insertarlos en el ListView
@@ -1124,7 +1220,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
         SendMessageW(hComboSearch, CB_ADDSTRING, 0, (LPARAM)L"Artist");
         SendMessageW(hComboSearch, CB_ADDSTRING, 0, (LPARAM)L"Song");
         SendMessageW(hComboSearch, CB_ADDSTRING, 0, (LPARAM)L"All");
-        SendMessageW(hComboSearch, CB_SETCURSEL, 0, 0);  // por defecto "Artist"
+        SendMessageW(hComboSearch, CB_SETCURSEL, 2, 0);  // default: "All"
 
         // 3) Inicializa el ComboBox de campo
         HWND hComboFormat = GetDlgItem(hDlg, IDC_COMBO_FORMAT);
@@ -1235,6 +1331,17 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
         break;
     }
     case WM_COMMAND: {
+        const int controlId = LOWORD(wParam);
+        const int notification = HIWORD(wParam);
+        if ((controlId == IDC_COMBO_SEARCH || controlId == IDC_COMBO_FORMAT) &&
+            (notification == CBN_EDITCHANGE || notification == CBN_SELCHANGE)) {
+            // Both controls are editable ComboBoxes. Coalesce selection and
+            // edit notifications so every user change triggers one search.
+            KillTimer(hDlg, IDT_SEARCH_DELAY);
+            SetTimer(hDlg, IDT_SEARCH_DELAY, SEARCH_DELAY_MS, nullptr);
+            return TRUE;
+        }
+
         if (LOWORD(wParam) == IDC_EDIT_SEARCH && HIWORD(wParam) == EN_CHANGE) {
             // Reinicia debounce-timer
             KillTimer(hDlg, IDT_SEARCH_DELAY);

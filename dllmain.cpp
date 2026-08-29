@@ -54,6 +54,55 @@ static HWND hWndConf = 0;
 static HWND hWndXMP;
 
 static sqlite3* g_db = nullptr;
+
+static void LogMessage(const std::wstring& message)
+{
+    wchar_t modulePath[MAX_PATH]{};
+    if (!GetModuleFileNameW(hInstance, modulePath, _countof(modulePath)))
+        return;
+    PathRemoveFileSpecW(modulePath);
+
+    wchar_t logPath[MAX_PATH]{};
+    if (!PathCombineW(logPath, modulePath, L"cmod.log"))
+        return;
+
+    HANDLE file = CreateFileW(
+        logPath, FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return;
+
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    wchar_t timestamp[32]{};
+    swprintf_s(timestamp, L"[%04u-%02u-%02u %02u:%02u:%02u] ",
+        now.wYear, now.wMonth, now.wDay,
+        now.wHour, now.wMinute, now.wSecond);
+
+    const std::string line = to_utf8(std::wstring(timestamp) + message + L"\r\n");
+    DWORD written = 0;
+    WriteFile(file, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    CloseHandle(file);
+}
+
+static void LogWin32Error(const wchar_t* operation, DWORD error)
+{
+    wchar_t message[256]{};
+    swprintf_s(message, L"%s failed (Win32 0x%08X).", operation, error);
+    LogMessage(message);
+}
+
+static void LogSqliteError(const wchar_t* operation, int rc, sqlite3* db = nullptr)
+{
+    std::wstring message = operation;
+    message += L" failed (SQLite ";
+    message += std::to_wstring(rc);
+    message += L"): ";
+    message += to_wide(db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
+    LogMessage(message);
+}
+
 // --- build info (caché en memoria) ---
 static time_t        g_dbBuiltUnix = 0;          // epoch (UTC)
 static std::wstring  g_dbBuiltIsoW;              // "YYYY-MM-DDTHH:MM:SSZ"
@@ -92,7 +141,9 @@ static unsigned __stdcall CheckUpdatesThread(void* pv)
 {
     std::unique_ptr<CheckParams> p((CheckParams*)pv);
     time_t remoteUtc = 0;
-    BOOL ok = HttpHead_LastModified(L"https://modland.com/allmods.zip", &remoteUtc) ? TRUE : FALSE;
+    const std::wstring allmodsUrl = to_wide(modland_allmods_url());
+    BOOL ok = HttpHead_LastModified(allmodsUrl.c_str(), &remoteUtc) ? TRUE : FALSE;
+    LogMessage(L"HEAD " + allmodsUrl + (ok ? L" succeeded." : L" failed."));
 
     // Post result back.  Use LPARAM for the 64-bit time safely.
     PostMessageW(p->hDlg, WM_CHECK_READY, (WPARAM)ok, (LPARAM)remoteUtc);
@@ -157,6 +208,37 @@ static bool g_use_pls = true;  // default if no config.ini is present
 
 // -- config, Size, URL encode and helpers
 
+static bool NormalizeModlandUrl(std::wstring value, std::wstring& normalized)
+{
+    size_t begin = 0;
+    while (begin < value.size() && std::iswspace(value[begin])) ++begin;
+    size_t end = value.size();
+    while (end > begin && std::iswspace(value[end - 1])) --end;
+    value = value.substr(begin, end - begin);
+
+    const bool isHttp = value.size() > 7 &&
+        _wcsnicmp(value.c_str(), L"http://", 7) == 0;
+    const bool isHttps = value.size() > 8 &&
+        _wcsnicmp(value.c_str(), L"https://", 8) == 0;
+    if (!isHttp && !isHttps)
+        return false;
+
+    for (wchar_t ch : value) {
+        if (std::iswspace(ch) || ch < 32 || ch == L'?' || ch == L'#' || ch == L'|')
+            return false;
+    }
+
+    while (!value.empty() && value.back() == L'/')
+        value.pop_back();
+
+    const size_t schemeLength = isHttps ? 8 : 7;
+    if (value.size() <= schemeLength)
+        return false;
+
+    normalized = value;
+    return true;
+}
+
 static std::wstring FormatsToIniValue(const std::set<std::string>& formats)
 {
     std::wstring value;
@@ -210,6 +292,8 @@ static bool ParseFormatsIni(const wchar_t* value, std::set<std::string>& formats
 
 static bool LoadConfigIni()
 {
+    set_modland_base_url(default_modland_base_url());
+
     // locate config.ini next to DLL
     wchar_t dllDir[MAX_PATH]{};
     if (!GetModuleFileNameW(hInstance, dllDir, MAX_PATH))
@@ -224,6 +308,21 @@ static bool LoadConfigIni()
     // (GetPrivateProfileIntW is simpler/safer than parsing a string)
     const int use_pls = GetPrivateProfileIntW(L"cmod", L"use_pls", /*default*/1, iniPath);
     g_use_pls = (use_pls != 0);
+
+    wchar_t modlandUrlBuffer[2048]{};
+    const DWORD modlandUrlChars = GetPrivateProfileStringW(
+        L"cmod", L"modland_url", L"", modlandUrlBuffer,
+        _countof(modlandUrlBuffer), iniPath);
+    if (modlandUrlChars == 0) {
+        const std::wstring defaultUrl = to_wide(default_modland_base_url());
+        WritePrivateProfileStringW(
+            L"cmod", L"modland_url", defaultUrl.c_str(), iniPath);
+    }
+    else if (modlandUrlChars < _countof(modlandUrlBuffer) - 1) {
+        std::wstring normalizedUrl;
+        if (NormalizeModlandUrl(modlandUrlBuffer, normalizedUrl))
+            set_modland_base_url(to_utf8(normalizedUrl));
+    }
 
     // Keep a compiled-in fallback, then replace it only with a complete,
     // non-empty INI value. GetPrivateProfileString reports truncation as
@@ -369,13 +468,26 @@ static void LoadDbBuildInfo(sqlite3* db, const std::wstring& dbPath)
 static bool RebuildDatabase(XMPFILE txtFile,
     const std::wstring& dbPathW, bool all)
 {
+    LogMessage(L"Building " + dbPathW + (all ? L" (all formats)." : L" (default formats)."));
+
     // Remove any old DB
-    ::DeleteFileW(dbPathW.c_str());
+    if (!DeleteFileW(dbPathW.c_str())) {
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND) {
+            LogWin32Error(L"Delete stale cmod_new.db", error);
+            return false;
+        }
+    }
 
     // Open new DB
     sqlite3* db = nullptr;
-    if (sqlite3_open16(dbPathW.c_str(), &db) != SQLITE_OK)
+    const int openRc = sqlite3_open16(dbPathW.c_str(), &db);
+    if (openRc != SQLITE_OK) {
+        LogSqliteError(L"Create cmod_new.db", openRc, db);
+        if (db) sqlite3_close(db);
         return false;
+    }
+    LogMessage(L"Created cmod_new.db.");
 
     sqlite3_exec(db, "PRAGMA encoding='UTF-8';", nullptr, nullptr, nullptr);
 
@@ -388,18 +500,27 @@ static bool RebuildDatabase(XMPFILE txtFile,
         "CREATE VIRTUAL TABLE modland USING fts5("
         " tracker, extension, artist, song, full_path, size UNINDEXED"
         ");";
-    if (sqlite3_exec(db, ddl, nullptr, nullptr, nullptr) != SQLITE_OK) {
+    const int ddlRc = sqlite3_exec(db, ddl, nullptr, nullptr, nullptr);
+    if (ddlRc != SQLITE_OK) {
+        LogSqliteError(L"Create FTS5 table", ddlRc, db);
         sqlite3_close(db);
         return false;
     }
 
     // Begin one big transaction
-    sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+    const int beginRc = sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+    if (beginRc != SQLITE_OK) {
+        LogSqliteError(L"Begin rebuild transaction", beginRc, db);
+        sqlite3_close(db);
+        return false;
+    }
 
     // Prepare insert statement once
     sqlite3_stmt* ins = nullptr;
     const char* sql = "INSERT INTO modland VALUES (?1,?2,?3,?4,?5,?6);";
-    if (sqlite3_prepare_v2(db, sql, -1, &ins, nullptr) != SQLITE_OK) {
+    const int prepareRc = sqlite3_prepare_v2(db, sql, -1, &ins, nullptr);
+    if (prepareRc != SQLITE_OK) {
+        LogSqliteError(L"Prepare module insert", prepareRc, db);
         sqlite3_close(db);
         return false;
     }
@@ -410,10 +531,18 @@ static bool RebuildDatabase(XMPFILE txtFile,
     const size_t CHUNK = 16 * 1024;
     std::vector<char> chunkBuf(CHUNK);
     std::string carry;  // holds partial line across reads
+    sqlite3_int64 totalBytes = 0;
+    sqlite3_int64 insertedRows = 0;
+    bool readFailed = false;
+    bool insertFailed = false;
 
-    while (true) {
+    while (!insertFailed) {
         int bytes = xmpffile->Read(txtFile, chunkBuf.data(), CHUNK);
-        if (bytes <= 0) break;
+        if (bytes <= 0) {
+            readFailed = bytes < 0;
+            break;
+        }
+        totalBytes += bytes;
         carry.append(chunkBuf.data(), bytes);
 
         size_t pos;
@@ -458,25 +587,61 @@ static bool RebuildDatabase(XMPFILE txtFile,
             sqlite3_bind_text(ins, 5, to_utf8(rest).c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_int64(ins, 6, std::wcstoll(wsiz.c_str(), nullptr, 10));
 
-            sqlite3_step(ins);
+            const int stepRc = sqlite3_step(ins);
+            if (stepRc != SQLITE_DONE) {
+                LogSqliteError(L"Insert module row", stepRc, db);
+                insertFailed = true;
+                break;
+            }
+            ++insertedRows;
             sqlite3_reset(ins);
         }
+    }
+
+    LogMessage(L"Read " + std::to_wstring(totalBytes) + L" bytes and inserted " +
+        std::to_wstring(insertedRows) + L" module rows.");
+
+    if (readFailed || insertFailed) {
+        if (readFailed) LogMessage(L"Reading allmods.txt failed before EOF.");
+        sqlite3_finalize(ins);
+        sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        sqlite3_close(db);
+        return false;
     }
 
     StoreDbBuildInfo(db, /*allFormats=*/all);
 
     // Finish up
-    sqlite3_finalize(ins);
-    sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
-    sqlite3_close(db);
+    const int finalizeRc = sqlite3_finalize(ins);
+    if (finalizeRc != SQLITE_OK) {
+        LogSqliteError(L"Finalize module insert", finalizeRc, db);
+        sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        sqlite3_close(db);
+        return false;
+    }
 
+    const int commitRc = sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
+    if (commitRc != SQLITE_OK) {
+        LogSqliteError(L"Commit rebuilt database", commitRc, db);
+        sqlite3_close(db);
+        return false;
+    }
 
+    const int closeRc = sqlite3_close(db);
+    if (closeRc != SQLITE_OK) {
+        LogSqliteError(L"Close rebuilt cmod_new.db", closeRc);
+        return false;
+    }
+
+    LogMessage(L"Finished building cmod_new.db.");
     return true;
 }
 
-// Closes the old g_db, renames cmod_new.db → cmod.db, and re-opens g_db
+// Closes the old DB and swaps cmod_new.db in while keeping a rollback copy.
 static bool SwapInNewDatabase()
 {
+    LogMessage(L"Database swap started.");
+
     // 1) Compute paths
     wchar_t modulePath[MAX_PATH];
     GetModuleFileNameW(hInstance, modulePath, MAX_PATH);
@@ -485,53 +650,136 @@ static bool SwapInNewDatabase()
 
     std::wstring oldDb = dir + L"\\cmod.db";
     std::wstring newDb = dir + L"\\cmod_new.db";
+    std::wstring backupDb = dir + L"\\cmod_old.db";
+
+    const std::string oldDbUtf8 = to_utf8(oldDb);
+
+    auto reopenDb = [&]() -> int {
+        sqlite3* reopened = nullptr;
+        const int rc = sqlite3_open_v2(
+            oldDbUtf8.c_str(),
+            &reopened,
+            SQLITE_OPEN_READONLY,
+            nullptr
+        );
+        if (rc != SQLITE_OK) {
+            LogSqliteError(L"Open cmod.db read-only", rc, reopened);
+            if (reopened) sqlite3_close(reopened);
+            g_db = nullptr;
+            return rc;
+        }
+
+        g_db = reopened;
+        LoadDbBuildInfo(g_db, oldDb);
+        return SQLITE_OK;
+    };
 
     // 2) Close old handle
     if (g_db) {
-        sqlite3_close(g_db);
+        const int closeRc = sqlite3_close(g_db);
+        if (closeRc != SQLITE_OK) {
+            LogSqliteError(L"Close current cmod.db", closeRc);
+            std::wstring msg = L"Cannot replace the database because SQLite could not close it.\n\nSQLite error:\n";
+            msg += to_wide(sqlite3_errstr(closeRc));
+            MessageBoxW(NULL, msg.c_str(), L"SwapInNewDatabase", MB_OK | MB_ICONERROR);
+            return false;
+        }
         g_db = nullptr;
+        LogMessage(L"Closed current cmod.db.");
     }
 
-    // 3) Replace files on disk
-    if (!::MoveFileExW(newDb.c_str(), oldDb.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        DWORD err = ::GetLastError();
-        wchar_t buf[128];
-        swprintf_s(buf, L"MoveFileW failed with 0x%08X", err);
+    // Recover a previous interrupted swap before starting a new one.
+    bool oldExists = GetFileAttributesW(oldDb.c_str()) != INVALID_FILE_ATTRIBUTES;
+    const bool backupExists = GetFileAttributesW(backupDb.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (backupExists) {
+        if (oldExists) {
+            if (!DeleteFileW(backupDb.c_str())) {
+                const DWORD err = GetLastError();
+                LogWin32Error(L"Delete stale cmod_old.db", err);
+                reopenDb();
+                wchar_t buf[192];
+                swprintf_s(buf, L"Could not remove stale cmod_old.db (0x%08X).", err);
+                MessageBoxW(NULL, buf, L"SwapInNewDatabase", MB_OK | MB_ICONERROR);
+                return false;
+            }
+        }
+        else {
+            if (!MoveFileW(backupDb.c_str(), oldDb.c_str())) {
+                const DWORD err = GetLastError();
+                LogWin32Error(L"Restore stale cmod_old.db", err);
+                wchar_t buf[192];
+                swprintf_s(buf, L"Could not restore cmod_old.db (0x%08X).", err);
+                MessageBoxW(NULL, buf, L"SwapInNewDatabase", MB_OK | MB_ICONERROR);
+                return false;
+            }
+            oldExists = true;
+            LogMessage(L"Restored cmod_old.db left by an interrupted swap.");
+        }
+    }
+
+    // 3) Move the current DB aside, then install the new DB.
+    if (oldExists && !MoveFileW(oldDb.c_str(), backupDb.c_str())) {
+        const DWORD err = GetLastError();
+        LogWin32Error(L"Move cmod.db to cmod_old.db", err);
+        reopenDb();
+        wchar_t buf[192];
+        swprintf_s(buf, L"Could not move cmod.db to cmod_old.db (0x%08X).", err);
+        MessageBoxW(NULL, buf, L"SwapInNewDatabase", MB_OK | MB_ICONERROR);
+        return false;
+    }
+    if (oldExists) LogMessage(L"Moved cmod.db to cmod_old.db.");
+
+    if (!MoveFileW(newDb.c_str(), oldDb.c_str())) {
+        const DWORD installErr = GetLastError();
+        LogWin32Error(L"Move cmod_new.db to cmod.db", installErr);
+        bool restored = !oldExists || MoveFileW(backupDb.c_str(), oldDb.c_str());
+        const DWORD restoreErr = restored ? ERROR_SUCCESS : GetLastError();
+        if (restored && oldExists) reopenDb();
+        if (restored && oldExists)
+            LogMessage(L"Restored cmod_old.db after install failure.");
+        else if (oldExists)
+            LogWin32Error(L"Restore cmod_old.db after install failure", restoreErr);
+
+        wchar_t buf[256];
+        if (restored && oldExists)
+            swprintf_s(buf, L"Could not install cmod_new.db (0x%08X). The old database was restored.", installErr);
+        else if (!oldExists)
+            swprintf_s(buf, L"Could not install cmod_new.db (0x%08X).", installErr);
+        else
+            swprintf_s(buf, L"Could not install cmod_new.db (0x%08X) or restore cmod_old.db (0x%08X).", installErr, restoreErr);
+        MessageBoxW(NULL, buf, L"SwapInNewDatabase", MB_OK | MB_ICONERROR);
+        return false;
+    }
+    LogMessage(L"Moved cmod_new.db to cmod.db.");
+
+    // 4) Re-open the installed DB. Roll back if it cannot be opened.
+    const int reopenRc = reopenDb();
+    if (reopenRc != SQLITE_OK) {
+        const bool removedNew = DeleteFileW(oldDb.c_str()) != FALSE;
+        const bool restored = oldExists && removedNew &&
+            MoveFileW(backupDb.c_str(), oldDb.c_str()) != FALSE;
+        if (restored && oldExists) reopenDb();
+        if (!removedNew)
+            LogWin32Error(L"Delete unusable new cmod.db", GetLastError());
+        if (restored)
+            LogMessage(L"Restored cmod_old.db after reopen failure.");
+
+        wchar_t buf[256];
+        if (restored)
+            swprintf_s(buf, L"Could not reopen the new database (SQLite error %d). The old database was restored.", reopenRc);
+        else if (!oldExists && removedNew)
+            swprintf_s(buf, L"Could not reopen the new database (SQLite error %d).", reopenRc);
+        else
+            swprintf_s(buf, L"Could not reopen the new database (SQLite error %d), and the old database could not be restored.", reopenRc);
         MessageBoxW(NULL, buf, L"SwapInNewDatabase", MB_OK | MB_ICONERROR);
         return false;
     }
 
-    // 4) Re-open into g_db
-    std::string oldDbUtf8 = to_utf8(oldDb);
-    int rc = sqlite3_open_v2(
-        oldDbUtf8.c_str(),
-        &g_db,
-        SQLITE_OPEN_READONLY,
-        nullptr
-    );
+    // The new DB is open and usable; the rollback copy is no longer needed.
+    if (oldExists && !DeleteFileW(backupDb.c_str()))
+        LogWin32Error(L"Delete cmod_old.db after successful swap", GetLastError());
 
-    if (rc != SQLITE_OK) {
-        // error -> mensaje
-        const char* errA = sqlite3_errmsg(g_db);
-        std::wstring errW = to_wide(errA);
-
-        std::wstring msg = L"Cannot reopen DB in:\n";
-        msg += oldDb;
-        msg += L"\n\nSQLite error:\n";
-        msg += errW;
-
-        MessageBoxW(NULL, msg.c_str(), L"SQLite Error", MB_OK | MB_ICONERROR);
-        sqlite3_close(g_db);
-        g_db = nullptr;
-        return false;
-    }
-
-    // ::DeleteFileW(zip.c_str());
-    // ::DeleteFileW(txt.c_str());
-
-    // Refresca caché de metadatos tras el swap
-    LoadDbBuildInfo(g_db, oldDb);
-
+    LogMessage(L"Database swap completed successfully.");
     return true;
 }
 
@@ -549,11 +797,15 @@ static unsigned __stdcall RebuildThread(void* pv)
     std::wstring newDb = dir + L"\\cmod_new.db";
 
     bool success = false;
+    LogMessage(all ? L"Rebuild started (all formats)." : L"Rebuild started (default formats).");
 
     // 2) Descarga
     xmpfmisc->ShowBubble("Downloading allmods...", 1000);
-    XMPFILE txtFile = xmpffile->Open("https://modland.com/allmods.zip|allmods.txt");
+    const std::string allmodsSource = modland_allmods_url() + "|allmods.txt";
+    LogMessage(L"Opening " + to_wide(allmodsSource));
+    XMPFILE txtFile = xmpffile->Open(allmodsSource.c_str());
     if (txtFile) {
+        LogMessage(L"Opened allmods.zip/allmods.txt successfully.");
         // read and process file here
         xmpfmisc->ShowBubble("Rebuilding DB…", 1000);
         if (RebuildDatabase(txtFile, newDb, all))
@@ -564,12 +816,22 @@ static unsigned __stdcall RebuildThread(void* pv)
             {
                 success = true;
             }
+            else {
+                LogMessage(L"Database swap failed.");
+            }
+        }
+        else {
+            LogMessage(L"Database build failed before the swap.");
         }
 
         xmpffile->Close(txtFile);
     }
+    else {
+        LogMessage(L"Could not open allmods.zip/allmods.txt through XMPlay.");
+    }
 
     // 6) Notificar resultado y liberar memoria
+    LogMessage(success ? L"Rebuild completed successfully." : L"Rebuild failed.");
     PostMessageW(hDlg, WM_DB_REBUILT, success ? TRUE : FALSE, 0);
     delete p;
     return 0;
@@ -1497,7 +1759,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                 L"  Cancel = Do nothing";
         }
         else {
-            msg = L"Could not contact modland.com to read Last-Modified.\n\n"
+            msg = L"Could not contact the configured Modland mirror to read Last-Modified.\n\n"
                 L"You can still rebuild:\n"
                 L"  Yes = Rebuild (default formats)\n"
                 L"  No  = Rebuild (all formats)\n"
@@ -1691,7 +1953,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                 msel += L"\"";
                 AppendMenuW(hPop, MF_STRING, ID_CONTEXT_SEARCH_ARTIST, msel.c_str());
                 AppendMenuW(hPop, MF_SEPARATOR, 0, NULL);
-                AppendMenuW(hPop, MF_STRING, ID_CONTEXT_COPY_URL, L"Copy song URL (modland.com) to clipboard");
+                AppendMenuW(hPop, MF_STRING, ID_CONTEXT_COPY_URL, L"Copy song URL to clipboard");
                 AppendMenuW(hPop, MF_SEPARATOR, 0, NULL);
                 WCHAR wSong[MAX_PATH];
                 ListView_GetItemText(hList, idx, 2, wSong, _countof(wSong));

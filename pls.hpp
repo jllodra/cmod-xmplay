@@ -48,7 +48,7 @@ inline std::string FileUrlFromPathW(const std::wstring& pathW) {
 }
 
 struct PlsEntry {
-    std::string fileUrl;  // e.g., https://modland.com/...
+    std::string fileUrl;  // URL on the configured Modland mirror
     std::string title;    // e.g., "Artist - Song"
 };
 

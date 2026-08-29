@@ -25,8 +25,29 @@ std::string url_encode_utf8(const std::string& input) {
     return out;
 }
 
+inline const char* default_modland_base_url() {
+    return "http://modland.com";
+}
+
+inline std::string& modland_base_url_storage() {
+    static std::string baseUrl = default_modland_base_url();
+    return baseUrl;
+}
+
+inline void set_modland_base_url(const std::string& baseUrl) {
+    modland_base_url_storage() = baseUrl;
+}
+
+inline const std::string& modland_base_url() {
+    return modland_base_url_storage();
+}
+
+inline std::string modland_allmods_url() {
+    return modland_base_url() + "/allmods.zip";
+}
+
 inline std::string modland_url_from_pathU8(const std::string& pathUtf8) {
-    return "https://modland.com/pub/modules/" + url_encode_utf8(pathUtf8);
+    return modland_base_url() + "/pub/modules/" + url_encode_utf8(pathUtf8);
 }
 
 inline std::string modland_url_from_pathW(const std::wstring& pathW) {

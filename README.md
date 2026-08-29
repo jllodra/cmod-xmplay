@@ -82,10 +82,13 @@ The **Format** box is editable; type one or several extensions such as `it,xm` (
 
 ## ⚙️ Configuration (optional)
 
-On startup, cmod creates `cmod.ini` **next to the plugin DLL** and adds its known formats. You can append more extensions to `formats`; if the value cannot be read or is empty, cmod uses its built-in list.
+On startup, cmod creates `cmod.ini` **next to the plugin DLL** and adds the default mirror and its known formats. You can append more extensions to `formats`; if a value cannot be read or is empty, cmod uses its built-in defaults.
 
 ```ini
 [cmod]
+; Base URL used for allmods.zip and module URLs.
+; Alternatives: https://modland.com or http://modland.antarctica.no
+modland_url=http://modland.com
 formats=669,a2m,a2t,amd,amf,ams,c67,cff,dbm,dfm,digi,dmf,dsm,dsym,dtm,far,fmk,fmt,gdm,hsc,ice,imf,it,j2b,m15,mdl,med,mmcmp,mmd0,mmd1,mmd2,mmd3,mmdc,mms,mo3,mod,mptm,mt2,mtk,mtm,nst,okt,oxm,plm,ppm,psm,pt36,ptm,rad,sa2,sat,s3m,sfx,sfx2,st26,stk,stm,stp,stx,symmod,ult,umx,wow,xm,xms,xpk
 ; Use on-the-fly PLS to control playlist titles.
 ; 1 = use PLS (recommended and default), 0 = add URLs directly (legacy behavior)
@@ -140,6 +143,7 @@ Cached files storage path info: [https://www.un4seen.com/forum/?topic=20680.0](h
 
 * **Network issues / proxies:**
   If XMPlay can’t reach Modland, check your proxy/firewall. The update checker does an HTTP **HEAD** on `allmods.zip` to compare timestamps, then downloads only when needed.
+  Update and rebuild diagnostics are appended to `cmod.log` next to the plugin DLL.
 
 * **Uninstall:**
   Close XMPlay and delete `xmp-cmod.dll` (and `cmod.db` if you want).

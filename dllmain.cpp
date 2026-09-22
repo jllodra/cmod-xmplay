@@ -47,6 +47,7 @@ struct PluginConfig {
 };
 
 static HWND hSearchDlg = nullptr;
+static bool g_initializingSearchDialog = false;
 
 static HINSTANCE hInstance;
 static HWND hWndConf = 0;
@@ -151,6 +152,7 @@ static unsigned __stdcall CheckUpdatesThread(void* pv)
 }
 
 #define IDT_SEARCH_DELAY      1
+#define IDT_STATE_SAVE        2
 #define SEARCH_DELAY_MS     300   // 300 ms de debounce
 
 // xmplay supported formats only (default)
@@ -290,18 +292,22 @@ static bool ParseFormatsIni(const wchar_t* value, std::set<std::string>& formats
     return !formats.empty();
 }
 
-static bool LoadConfigIni()
+static bool GetConfigIniPath(wchar_t (&iniPath)[MAX_PATH])
 {
-    set_modland_base_url(default_modland_base_url());
-
-    // locate config.ini next to DLL
     wchar_t dllDir[MAX_PATH]{};
     if (!GetModuleFileNameW(hInstance, dllDir, MAX_PATH))
         return false;
     PathRemoveFileSpecW(dllDir);
 
+    return PathCombineW(iniPath, dllDir, L"cmod.ini") != nullptr;
+}
+
+static bool LoadConfigIni()
+{
+    set_modland_base_url(default_modland_base_url());
+
     wchar_t iniPath[MAX_PATH]{};
-    if (!PathCombineW(iniPath, dllDir, L"cmod.ini"))
+    if (!GetConfigIniPath(iniPath))
         return false;
 
     // Read use_pls under [cmod]
@@ -373,6 +379,82 @@ inline std::wstring get_window_textW(HWND h) {
     if (got < 0) got = 0;
     w.resize(got);                                // quita el NUL
     return w;
+}
+
+static std::wstring ReadSearchStateIni(const wchar_t* key, const wchar_t* fallback)
+{
+    wchar_t iniPath[MAX_PATH]{};
+    if (!GetConfigIniPath(iniPath))
+        return fallback;
+
+    wchar_t value[4096]{};
+    const DWORD chars = GetPrivateProfileStringW(
+        L"cmod", key, fallback, value, _countof(value), iniPath);
+    return chars < _countof(value) - 1 ? std::wstring(value) : std::wstring(fallback);
+}
+
+static void WriteSearchStateIni(const wchar_t* key, const std::wstring& value)
+{
+    wchar_t iniPath[MAX_PATH]{};
+    if (GetConfigIniPath(iniPath))
+        WritePrivateProfileStringW(L"cmod", key, value.c_str(), iniPath);
+}
+
+static void SaveSearchDialogState(HWND hDlg)
+{
+    WriteSearchStateIni(L"last_search",
+        get_window_textW(GetDlgItem(hDlg, IDC_EDIT_SEARCH)));
+
+    const int searchBy = static_cast<int>(SendMessageW(
+        GetDlgItem(hDlg, IDC_COMBO_SEARCH), CB_GETCURSEL, 0, 0));
+    static const wchar_t* searchByValues[] = { L"artist", L"song", L"all" };
+    const wchar_t* searchByValue =
+        searchBy >= 0 && searchBy < _countof(searchByValues)
+            ? searchByValues[searchBy] : L"all";
+    WriteSearchStateIni(L"search_by", searchByValue);
+
+    std::wstring format = get_window_textW(GetDlgItem(hDlg, IDC_COMBO_FORMAT));
+    if (format.empty()) format = L"Any";
+    WriteSearchStateIni(L"format", format);
+
+    std::wstring songCount = get_window_textW(GetDlgItem(hDlg, IDC_COMBO_NUMBER));
+    if (songCount.empty()) songCount = L"100";
+    WriteSearchStateIni(L"song_count", songCount);
+}
+
+static int SearchByIndexFromIni(const std::wstring& value)
+{
+    if (_wcsicmp(value.c_str(), L"artist") == 0) return 0;
+    if (_wcsicmp(value.c_str(), L"song") == 0) return 1;
+    return 2; // "all" and invalid values fall back to All.
+}
+
+static void RestoreSearchDialogState(HWND hDlg)
+{
+    const std::wstring search = ReadSearchStateIni(L"last_search", L"");
+    const std::wstring searchBy = ReadSearchStateIni(L"search_by", L"all");
+    const std::wstring format = ReadSearchStateIni(L"format", L"Any");
+    const std::wstring songCount = ReadSearchStateIni(L"song_count", L"100");
+
+    SetDlgItemTextW(hDlg, IDC_EDIT_SEARCH, search.c_str());
+    SendMessageW(GetDlgItem(hDlg, IDC_COMBO_SEARCH), CB_SETCURSEL,
+        SearchByIndexFromIni(searchBy), 0);
+    SetWindowTextW(GetDlgItem(hDlg, IDC_COMBO_FORMAT), format.c_str());
+
+    HWND hComboCount = GetDlgItem(hDlg, IDC_COMBO_NUMBER);
+    const int countIndex = static_cast<int>(SendMessageW(
+        hComboCount, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1),
+        reinterpret_cast<LPARAM>(songCount.c_str())));
+    SendMessageW(hComboCount, CB_SETCURSEL, countIndex == CB_ERR ? 2 : countIndex, 0);
+
+    // Also creates the four keys on first use, with the defaults above.
+    SaveSearchDialogState(hDlg);
+}
+
+static void ScheduleSearchStateSave(HWND hDlg)
+{
+    KillTimer(hDlg, IDT_STATE_SAVE);
+    SetTimer(hDlg, IDT_STATE_SAVE, SEARCH_DELAY_MS, nullptr);
 }
 
 // -- DB build info storage/retrieval
@@ -1049,6 +1131,8 @@ static std::string BuildMatchFromFreeText(const std::wstring& wquery) {
 }
 
 static void DoSearch(HWND hDlg, bool exact, int randomCount) {
+    SaveSearchDialogState(hDlg);
+
     if (!EnsureDatabaseOpen(hDlg))
         return;    // if it failed, we already showed an error
 
@@ -1409,6 +1493,8 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
     switch (message) {
     case WM_INITDIALOG:
     {
+        g_initializingSearchDialog = true;
+
         // 1) Captura tamaño cliente inicial
         GetClientRect(hDlg, &g_rcInitClient);
 
@@ -1487,6 +1573,7 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
         // 3) Inicializa el ComboBox de campo
         HWND hComboFormat = GetDlgItem(hDlg, IDC_COMBO_FORMAT);
         SendMessageW(hComboFormat, CB_RESETCONTENT, 0, 0);
+        SendMessageW(hComboFormat, CB_LIMITTEXT, 0, 0);  // maximum supported input length
         SendMessageW(hComboFormat, CB_ADDSTRING, 0, (LPARAM)L"Any");
         SendMessageW(hComboFormat, CB_ADDSTRING, 0, (LPARAM)L"IT");
         SendMessageW(hComboFormat, CB_ADDSTRING, 0, (LPARAM)L"XM");
@@ -1531,6 +1618,14 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
         std::wstring t = L"cmod";
         t += DbBadge();
         SetWindowTextW(hDlg, t.c_str());
+
+        RestoreSearchDialogState(hDlg);
+        g_initializingSearchDialog = false;
+
+        // Reopen the dialog in the same useful state as the previous session,
+        // but launch only one search after all controls have been restored.
+        if (get_window_textW(GetDlgItem(hDlg, IDC_EDIT_SEARCH)).size() >= 3)
+            SetTimer(hDlg, IDT_SEARCH_DELAY, SEARCH_DELAY_MS, nullptr);
 
         return TRUE;
     }
@@ -1590,6 +1685,11 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
             DoSearch(hDlg, /*exact=*/false, /*randomCount=*/0);
             return TRUE;
         }
+        if (wParam == IDT_STATE_SAVE) {
+            KillTimer(hDlg, IDT_STATE_SAVE);
+            SaveSearchDialogState(hDlg);
+            return TRUE;
+        }
         break;
     }
     case WM_COMMAND: {
@@ -1597,16 +1697,22 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
         const int notification = HIWORD(wParam);
         if ((controlId == IDC_COMBO_SEARCH || controlId == IDC_COMBO_FORMAT) &&
             (notification == CBN_EDITCHANGE || notification == CBN_SELCHANGE)) {
+            if (g_initializingSearchDialog)
+                return TRUE;
             // Both controls are editable ComboBoxes. Coalesce selection and
             // edit notifications so every user change triggers one search.
             KillTimer(hDlg, IDT_SEARCH_DELAY);
             SetTimer(hDlg, IDT_SEARCH_DELAY, SEARCH_DELAY_MS, nullptr);
+            ScheduleSearchStateSave(hDlg);
             return TRUE;
         }
 
         if (LOWORD(wParam) == IDC_EDIT_SEARCH && HIWORD(wParam) == EN_CHANGE) {
+            if (g_initializingSearchDialog)
+                return TRUE;
             // Reinicia debounce-timer
             KillTimer(hDlg, IDT_SEARCH_DELAY);
+            ScheduleSearchStateSave(hDlg);
 
             // 2) Lee el contenido actual
             wchar_t buf[256];
@@ -1623,6 +1729,12 @@ static BOOL CALLBACK SearchDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARA
                 // ListView_DeleteAllItems(GetDlgItem(hDlg, IDC_LIST_RESULTS));
                 SetDlgItemTextW(hDlg, IDC_STATIC_COUNT, L"Type at least 3 letters");
             }
+            return TRUE;
+        }
+
+        if (controlId == IDC_COMBO_NUMBER && notification == CBN_SELCHANGE) {
+            if (!g_initializingSearchDialog)
+                ScheduleSearchStateSave(hDlg);
             return TRUE;
         }
 
